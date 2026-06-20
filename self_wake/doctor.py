@@ -39,6 +39,76 @@ def _cron_wake_config() -> tuple[Optional[bool], str]:
     return None, "cron section absent"
 
 
+# Categories returned by :func:`_classify_capability_failure`. They distinguish
+# "Hermes was upgraded and internal module paths changed" from "the core patch
+# was never applied" from "the receipt table is absent" — three failure modes
+# that previously all looked like an undifferentiated ``core capability
+# missing`` and would lead an operator to re-apply the patch when the real
+# issue was a module-path change on upgrade (see review finding M2).
+CAP_FAIL_IMPORT_CHANGED = "import_changed"
+CAP_FAIL_ATTRIBUTE_MISSING = "attribute_missing"
+CAP_FAIL_RECEIPT_TABLE_ABSENT = "receipt_table_absent"
+CAP_FAIL_UNKNOWN = "unknown"
+
+
+def _classify_capability_failure(details: list[dict[str, Any]]) -> tuple[str, str]:
+    """Categorize why the wake capability probe failed.
+
+    Returns ``(category, summary)``. ``summary`` is a short human-readable
+    string naming the first failing probe and its reason. When the capability
+    is fully available the category is ``CAP_FAIL_UNKNOWN`` with an empty
+    summary — callers should only invoke this when ``available`` is False.
+    """
+    for d in details:
+        if d.get("available"):
+            continue
+        probe = str(d.get("probe") or "")
+        reason = str(d.get("reason") or "")
+        if "not importable" in reason:
+            return CAP_FAIL_IMPORT_CHANGED, f"{probe}: {reason}"
+        if ("not present" in reason or "missing methods" in reason
+                or "missing required params" in reason
+                or "signature not introspectable" in reason
+                or "return contract drift" in reason):
+            return CAP_FAIL_ATTRIBUTE_MISSING, f"{probe}: {reason}"
+        if ("table absent" in reason or "state.db not found" in reason
+                or "state.db unreadable" in reason):
+            return CAP_FAIL_RECEIPT_TABLE_ABSENT, f"{probe}: {reason}"
+        return CAP_FAIL_UNKNOWN, f"{probe}: {reason}"
+    return CAP_FAIL_UNKNOWN, ""
+
+
+def _capability_remediation(category: str) -> str:
+    """Return category-specific operator guidance for a missing capability."""
+    if category == CAP_FAIL_IMPORT_CHANGED:
+        return (
+            "Host capability probe failed on import — Hermes may have been "
+            "upgraded and the internal module paths the plugin probes "
+            "(gateway.run, hermes_state, gateway.session) may have changed. "
+            "Re-check the plugin against the new Hermes version, or pin Hermes "
+            "to a commit compatible with internal_session_wake_v1. Re-applying "
+            "the core patch will NOT fix a module-path change."
+        )
+    if category == CAP_FAIL_ATTRIBUTE_MISSING:
+        return (
+            "Apply docs/core-patch/0001-internal-session-wake-v1.patch to "
+            "Hermes, or upgrade to a Hermes version that includes "
+            "internal_session_wake_v1. The host imports resolved, but the "
+            "wake_session primitive / receipt methods are not present "
+            "(core patch not applied, or return contract drifted)."
+        )
+    if category == CAP_FAIL_RECEIPT_TABLE_ABSENT:
+        return (
+            "The session_wake_receipts table is absent from state.db. It is "
+            "created by the internal_session_wake_v1 core patch — apply the "
+            "patch from docs/core-patch/ or upgrade Hermes."
+        )
+    return (
+        "Apply docs/core-patch/0001-internal-session-wake-v1.patch to Hermes, "
+        "or upgrade to a Hermes version that includes internal_session_wake_v1."
+    )
+
+
 def run_diagnostics(
     hermes_home: str | Path | None = None,
     backend: Optional[kanban_mod.KanbanBackend] = None,
@@ -60,24 +130,34 @@ def run_diagnostics(
 
     # 1. Core capability + version
     cap = caps.probe_wake_capability(hermes_home)
+    cap_category, cap_summary = (
+        _classify_capability_failure(cap.get("details", []))
+        if not cap["available"] else (CAP_FAIL_UNKNOWN, "")
+    )
+    cap_detail = (
+        f"mode={cap['mode']} version={cap['version']} "
+        f"required={cap['required_capability']}_v{cap['required_version']}"
+    )
+    if not cap["available"]:
+        cap_detail = f"{cap_detail} — {cap_category}: {cap_summary}"
     checks.append(_check(
         "core_capability", "ok" if cap["available"] else "fail",
-        f"mode={cap['mode']} version={cap['version']} "
-        f"required={cap['required_capability']}_v{cap['required_version']}",
-        remediation=(caps.require_wake_capability(hermes_home) or {}).get("remediation", ""),
+        cap_detail,
+        remediation=(_capability_remediation(cap_category)
+                     if not cap["available"] else ""),
     ))
     if not cap["available"]:
-        failures.append(f"core capability missing: mode={cap['mode']}")
-        remediation.append(
-            "Apply docs/core-patch/0001-internal-session-wake-v1.patch to Hermes, "
-            "or upgrade to a Hermes version that includes internal_session_wake_v1."
+        failures.append(
+            f"core capability missing: mode={cap['mode']} "
+            f"({cap_category}: {cap_summary})"
         )
+        remediation.append(_capability_remediation(cap_category))
 
     # 2. Session index readable
     sessions_index = sessions_mod.read_sessions_index(hermes_home)
     n_sessions = len(sessions_index)
     checks.append(_check(
-        "session_index", "ok" if n_sessions >= 0 else "fail",
+        "session_index", "ok" if n_sessions > 0 else "warn",
         f"{n_sessions} session(s) in sessions.json",
     ))
     if n_sessions == 0:
@@ -104,16 +184,44 @@ def run_diagnostics(
             "Created by the internal_session_wake_v1 core patch.",
         ))
         if cap["mode"] != "full":
-            remediation.append("Receipt table absent — core patch not applied.")
+            # The capability-failure remediation already covers the root cause
+            # (import_changed vs attribute_missing vs receipt_table_absent);
+            # keep this note table-specific so it never contradicts that
+            # categorization (review finding M2).
+            remediation.append(
+                "Receipt table absent — created by the internal_session_wake_v1 "
+                "core patch; see the core_capability remediation for the "
+                "specific failure category."
+            )
 
     # 4. Kanban DB reachable + existing wake subscriptions
-    subs = kanban_mod.list_wake_subscriptions(backend=backend, hermes_home=hermes_home)
-    wake_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) in ("session", "session_id")]
-    visible_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) == "visible_only"]
-    checks.append(_check(
-        "kanban_db", "ok" if subs or True else "fail",
-        f"{len(subs)} notify sub(s): {len(wake_subs)} wake, {len(visible_subs)} visible-only",
-    ))
+    # Resolve the backend explicitly so a missing/unreachable Kanban DB is
+    # reported as a failure rather than masked by list_wake_subscriptions
+    # swallowing all errors and returning [] (review finding H1: the old
+    # ``subs or True`` check could never report "fail").
+    kb_backend, kb_err = (
+        (backend, None) if backend is not None
+        else kanban_mod.try_default_backend()
+    )
+    if kb_backend is None:
+        checks.append(_check(
+            "kanban_db", "fail",
+            f"kanban backend unavailable: {kb_err or 'unknown'}",
+            "Ensure hermes_cli.kanban_db is importable and the board DB "
+            "is reachable in this Hermes process.",
+        ))
+        subs: list[dict[str, Any]] = []
+        wake_subs: list[dict[str, Any]] = []
+        visible_subs: list[dict[str, Any]] = []
+    else:
+        subs = kanban_mod.list_wake_subscriptions(backend=kb_backend, hermes_home=hermes_home)
+        wake_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) in ("session", "session_id")]
+        visible_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) == "visible_only"]
+        checks.append(_check(
+            "kanban_db", "ok",
+            f"{len(subs)} notify sub(s): {len(wake_subs)} wake, "
+            f"{len(visible_subs)} visible-only",
+        ))
     if visible_subs and cap["available"]:
         warnings.append(
             f"{len(visible_subs)} visible-only subscription(s) will not wake the agent; "

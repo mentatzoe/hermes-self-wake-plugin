@@ -1,17 +1,3 @@
-# Combined upstream-candidate patch for Hermes internal_session_wake_v1
-#
-# Generated from local Hermes Agent commits:
-#   3d122a1ac feat: add internal session wake primitive
-#   62e0f2e52 feat: wake sessions from send-message and kanban subscriptions
-#   489720101 fix: queue internal wakes for active sessions
-#   f45057c48 fix: queue active internal wakes without interrupt
-#   4a9087b67 fix: queue internal wakes before foreground bypasses
-#   1d5b98c39 feat: wake sessions after cron delivery
-# Base: b7f0c9cd52febc32f4d2fb6205f3291c9e7bcf98
-#
-# Apply with: git apply docs/core-patch/0001-internal-session-wake-v1.patch
-# This is a reviewable artifact, not applied by the self-wake plugin.
-
 diff --git a/cron/scheduler.py b/cron/scheduler.py
 index 359069966..6ee6e80bf 100644
 --- a/cron/scheduler.py
@@ -1876,17 +1862,30 @@ index 2762e220e..1dddffd8d 100644
      # No such task → exit-style (no log for...) message on stderr, returned
      # in combined output.
 diff --git a/tests/tools/test_send_message_tool.py b/tests/tools/test_send_message_tool.py
-index 81cee1bb1..2c8640317 100644
+index 81cee1bb1..aad479881 100644
 --- a/tests/tools/test_send_message_tool.py
 +++ b/tests/tools/test_send_message_tool.py
-@@ -240,6 +240,123 @@ class TestSendMessageTool:
+@@ -240,6 +240,156 @@ class TestSendMessageTool:
          send_mock.assert_not_awaited()
          mirror_mock.assert_not_called()
  
 +    def test_successful_mirror_schedules_internal_wake_on_live_gateway(self):
 +        config, telegram_cfg = _make_config()
 +        wake_session = AsyncMock(return_value={"status": "agent_responded", "receipt_id": 42})
-+        runner = SimpleNamespace(wake_session=wake_session)
++        gateway_loop = object()
++        runner = SimpleNamespace(wake_session=wake_session, _gateway_loop=gateway_loop)
++        scheduled = {}
++
++        class _NonBlockingFuture:
++            def result(self, timeout=None):  # pragma: no cover - must not be called
++                raise AssertionError("send_message must not block on wake_session")
++
++        def _schedule_without_waiting(coro, loop, **_kwargs):
++            scheduled["loop"] = loop
++            # The real helper schedules this coroutine on the gateway loop. The
++            # test closes it because we deliberately do not run or await it here.
++            coro.close()
++            return _NonBlockingFuture()
 +
 +        with patch("gateway.config.load_gateway_config", return_value=config), \
 +             patch("tools.interrupt.is_interrupted", return_value=False), \
@@ -1897,7 +1896,8 @@ index 81cee1bb1..2c8640317 100644
 +             ) as send_mock, \
 +             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock, \
 +             patch("gateway.mirror.find_session_id", return_value="target-session-id"), \
-+             patch("gateway.run._gateway_runner_ref", return_value=runner):
++             patch("gateway.run._gateway_runner_ref", return_value=runner), \
++             patch("agent.async_utils.safe_schedule_threadsafe", side_effect=_schedule_without_waiting):
 +            result = json.loads(
 +                send_message_tool(
 +                    {
@@ -1911,7 +1911,9 @@ index 81cee1bb1..2c8640317 100644
 +        assert result["success"] is True
 +        assert result["mirrored"] is True
 +        assert result["woke_agent"] is True
-+        assert result["wake_receipt_id"] == 42
++        assert result["wake_agent_status"] == "scheduled"
++        assert "wake_receipt_id" not in result
++        assert scheduled["loop"] is gateway_loop
 +        send_mock.assert_awaited_once_with(
 +            Platform.TELEGRAM,
 +            telegram_cfg,
@@ -1922,15 +1924,15 @@ index 81cee1bb1..2c8640317 100644
 +            force_document=False,
 +        )
 +        mirror_mock.assert_called_once()
-+        wake_session.assert_awaited_once()
-+        assert wake_session.await_args is not None
-+        wake_kwargs = wake_session.await_args.kwargs
++        wake_session.assert_called_once()
++        wake_session.assert_not_awaited()
++        wake_kwargs = wake_session.call_args.kwargs
 +        assert wake_kwargs["session_id"] == "target-session-id"
 +        assert wake_kwargs["source_kind"] == "send_message"
 +        assert wake_kwargs["dedupe_key"].startswith("send_message:telegram:12345:")
 +        assert "wake the existing lane" in wake_kwargs["payload"]
 +
-+    def test_successful_mirror_same_active_session_wake_returns_queued_without_blocking(self, monkeypatch, tmp_path):
++    def test_successful_mirror_same_active_session_wake_is_scheduled_without_blocking(self, monkeypatch, tmp_path):
 +        import hermes_state
 +        from gateway.config import GatewayConfig, PlatformConfig
 +        from gateway.run import GatewayRunner
@@ -1943,6 +1945,7 @@ index 81cee1bb1..2c8640317 100644
 +                platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="test-token")}
 +            )
 +        )
++        runner._gateway_loop = object()
 +        entry = runner.session_store.get_or_create_session(
 +            SessionSource(
 +                platform=Platform.TELEGRAM,
@@ -1969,6 +1972,19 @@ index 81cee1bb1..2c8640317 100644
 +            async def handle_message(self, event):
 +                self._pending_messages[entry.session_key] = event
 +
++        class _NonBlockingFuture:
++            def result(self, timeout=None):  # pragma: no cover - must not be called
++                raise AssertionError("send_message must not block on wake_session")
++
++        scheduled = {}
++
++        def _schedule_and_run_for_test(coro, loop, **_kwargs):
++            scheduled["loop"] = loop
++            # Run the coroutine here so the test can inspect the queued event,
++            # but return a future whose result() would fail if the tool waited.
++            scheduled["wake_result"] = asyncio.run(coro)
++            return _NonBlockingFuture()
++
 +        adapter = _ActiveAdapter()
 +        runner.adapters = {Platform.TELEGRAM: adapter}
 +
@@ -1980,7 +1996,8 @@ index 81cee1bb1..2c8640317 100644
 +             ), \
 +             patch("gateway.mirror.mirror_to_session", return_value=True), \
 +             patch("gateway.mirror.find_session_id", return_value=entry.session_id), \
-+             patch("gateway.run._gateway_runner_ref", return_value=runner):
++             patch("gateway.run._gateway_runner_ref", return_value=runner), \
++             patch("agent.async_utils.safe_schedule_threadsafe", side_effect=_schedule_and_run_for_test):
 +            result = json.loads(
 +                send_message_tool(
 +                    {
@@ -1994,7 +2011,9 @@ index 81cee1bb1..2c8640317 100644
 +        assert result["success"] is True
 +        assert result["mirrored"] is True
 +        assert result["woke_agent"] is True
-+        assert result["wake_agent_status"] == "queued"
++        assert result["wake_agent_status"] == "scheduled"
++        assert scheduled["loop"] is runner._gateway_loop
++        assert scheduled["wake_result"]["status"] == "queued"
 +        assert adapter._pending_messages[entry.session_key].internal is True
 +        assert adapter._pending_messages[entry.session_key].text.startswith(
 +            "Internal wake from send_message:"
@@ -2029,7 +2048,7 @@ index 7ec31b806..23fea037e 100644
  
  
 diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
-index 3bbcbff8b..f6efc58bc 100644
+index 3bbcbff8b..11d6481d9 100644
 --- a/tools/send_message_tool.py
 +++ b/tools/send_message_tool.py
 @@ -6,6 +6,7 @@ human-friendly channel names to IDs. Works in both CLI and gateway contexts.
@@ -2040,7 +2059,7 @@ index 3bbcbff8b..f6efc58bc 100644
  import json
  import logging
  import os
-@@ -439,24 +440,80 @@ def _handle_send(args):
+@@ -439,24 +440,102 @@ def _handle_send(args):
          if used_home_channel and isinstance(result, dict) and result.get("success"):
              result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
  
@@ -2101,23 +2120,45 @@ index 3bbcbff8b..f6efc58bc 100644
 +                            "context and continue if follow-through is needed.\n\n"
 +                            f"Sent content:\n{mirror_text}"
 +                        )
-+                        wake_result = _run_async(wake_fn(
-+                            session_id=target_session_id,
-+                            payload=wake_payload,
-+                            source_kind="send_message",
-+                            dedupe_key=(
-+                                f"send_message:{platform_name}:{chat_id}:"
-+                                f"{thread_id or ''}:{dedupe_hash}"
-+                            ),
-+                        ))
-+                        if isinstance(wake_result, dict):
-+                            result["wake_agent_status"] = wake_result.get("status")
-+                            if wake_result.get("receipt_id") is not None:
-+                                result["wake_receipt_id"] = wake_result.get("receipt_id")
-+                            if wake_result.get("status") != "failure":
-+                                result["woke_agent"] = True
-+                            elif wake_result.get("error"):
-+                                result["wake_error"] = _sanitize_error_text(wake_result["error"])
++                        try:
++                            from agent.async_utils import safe_schedule_threadsafe
++                            wake_future = safe_schedule_threadsafe(
++                                wake_fn(
++                                    session_id=target_session_id,
++                                    payload=wake_payload,
++                                    source_kind="send_message",
++                                    dedupe_key=(
++                                        f"send_message:{platform_name}:{chat_id}:"
++                                        f"{thread_id or ''}:{dedupe_hash}"
++                                    ),
++                                ),
++                                getattr(runner, "_gateway_loop", None),
++                                logger=logger,
++                                log_message=(
++                                    "send_message internal wake: failed to schedule "
++                                    "on gateway loop"
++                                ),
++                            )
++                        except Exception as wake_exc:
++                            logger.debug("send_message internal wake scheduling failed: %s", wake_exc)
++                            wake_future = None
++                            result["wake_agent_status"] = "failure"
++                            result["wake_error"] = _sanitize_error_text(
++                                f"{type(wake_exc).__name__}: {wake_exc}"
++                            )
++                        if wake_future is None and "wake_agent_status" not in result:
++                            result["wake_agent_status"] = "failure"
++                            result["wake_error"] = (
++                                "gateway loop unavailable for send_message internal wake"
++                            )
++                        elif wake_future is not None:
++                            # Do not call wake_future.result() here: for an idle
++                            # target session, wake_session may run the target
++                            # agent turn and wait for its response. The sending
++                            # tool only schedules the control-plane wake; the
++                            # durable receipt carries the eventual outcome.
++                            result["wake_agent_status"] = "scheduled"
++                            result["woke_agent"] = True
 +                    elif target_session_id:
 +                        result["wake_agent_status"] = "unavailable"
              except Exception:

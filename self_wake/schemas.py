@@ -69,7 +69,7 @@ SELF_WAKE_RECEIPTS = {
             "session_key": {"type": "string", "description": "Filter by target session key."},
             "session_id": {"type": "string", "description": "Filter by target session id."},
             "source_kind": {"type": "string", "description": "Filter by source kind, e.g. kanban, cron_delivery, send_message."},
-            "status": {"type": "string", "description": "Filter by receipt status, e.g. queued, dispatched, agent_responded, failure."},
+            "status": {"type": "string", "description": "Filter by receipt status. Valid values: requested, dispatched, queued, agent_responded, failure, deduped."},
             "dedupe_key": {"type": "string", "description": "Filter by exact dedupe key."},
             "limit": {"type": "integer", "description": "Maximum receipts to return (default 50, max 200)."},
         },

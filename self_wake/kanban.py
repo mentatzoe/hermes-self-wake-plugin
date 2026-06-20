@@ -118,10 +118,18 @@ def try_default_backend() -> tuple[Optional[KanbanBackend], Optional[str]]:
 
 
 def set_default_backend(backend: Optional[KanbanBackend]) -> None:
-    """Test hook: inject or clear the default backend."""
+    """Test hook: inject or clear the default backend.
+
+    Passing ``None`` resets the cached backend *and* any cached import error
+    so the next :func:`try_default_backend` call re-resolves from scratch
+    (rather than returning a stale ``"backend cleared"`` error). This matters
+    for diagnostics — :func:`doctor.run_diagnostics` calls
+    :func:`try_default_backend` to decide whether the Kanban DB is reachable,
+    and a stale cached error would misreport a reachable backend as failed.
+    """
     global _default_backend, _default_backend_error
     _default_backend = backend
-    _default_backend_error = None if backend is not None else "backend cleared"
+    _default_backend_error = None
 
 
 def _resolve_backend(backend: Optional[KanbanBackend]) -> tuple[Optional[KanbanBackend], Optional[str]]:

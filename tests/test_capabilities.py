@@ -11,7 +11,7 @@ def test_probe_returns_structured_result(hermes_home):
     assert result["mode"] in ("full", "inspect_only", "unsupported")
     assert result["required_capability"] == "internal_session_wake"
     assert result["required_version"] == 1
-    assert isinstance(result["details"], list) and len(result["details"]) == 5
+    assert isinstance(result["details"], list) and len(result["details"]) == 6
 
 
 def test_unsupported_mode_when_nothing_readable(monkeypatch, tmp_path):
@@ -88,3 +88,62 @@ def test_receipt_table_probe_absent(hermes_home):
 def test_session_index_probe_dict_format(hermes_home):
     from self_wake.capabilities import _probe_session_index_readable
     assert _probe_session_index_readable()["available"] is True
+
+
+def test_probe_wake_session_return_shape_detects_drift(monkeypatch):
+    """The return-shape probe partially detects wake_session return-contract
+    drift by inspecting the function source for the v1 return keys
+    (``status`` and ``receipt_id``). See docs/compatibility.md (review M3)."""
+    import sys
+    import types
+    from self_wake import capabilities as caps
+
+    async def _good_wake(self, *, payload, source_kind, **kw):
+        return {"status": "ok", "receipt_id": 1}
+
+    async def _drifted_wake(self, *, payload, source_kind, **kw):
+        return {"result": "ok", "id": 1}
+
+    def _install(wake_fn):
+        fake_runner = types.SimpleNamespace(wake_session=wake_fn)
+        fake_mod = types.ModuleType("gateway.run")
+        setattr(fake_mod, "GatewayRunner", fake_runner)
+        parent = types.ModuleType("gateway")
+        setattr(parent, "run", fake_mod)
+        monkeypatch.setitem(sys.modules, "gateway", parent)
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_mod)
+
+    _install(_good_wake)
+    ok = caps._probe_wake_session_return_shape()
+    assert ok["available"] is True
+
+    _install(_drifted_wake)
+    drifted = caps._probe_wake_session_return_shape()
+    assert drifted["available"] is False
+    assert "return contract drift" in drifted["reason"]
+    assert "status" in drifted["reason"]
+
+
+def test_return_shape_drift_downgrades_from_full(monkeypatch, tmp_path):
+    """If wake_session's return shape drifts, the host must NOT report full
+    mode even when every other probe passes (return-contract drift is
+    detected, not silently accepted)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    from self_wake import capabilities as caps
+    monkeypatch.setattr(caps, "_probe_gateway_wake_session",
+                        lambda: {"probe": "gateway.wake_session", "available": True})
+    monkeypatch.setattr(caps, "_probe_wake_session_return_shape",
+                        lambda: {"probe": "wake_session.return_shape", "available": False,
+                                 "reason": "wake_session return contract drift: 'status' key not found in source"})
+    monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
+                        lambda: {"probe": "session_db.receipt_methods", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_store_lookup",
+                        lambda: {"probe": "session_store.lookup", "available": True})
+    monkeypatch.setattr(caps, "_probe_receipt_table",
+                        lambda hh=None: {"probe": "receipt_table", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_index_readable",
+                        lambda hh=None: {"probe": "session_index", "available": True})
+    cap = caps.probe_wake_capability()
+    assert cap["mode"] != "full"
+    assert cap["available"] is False
+    assert cap["version"] is None

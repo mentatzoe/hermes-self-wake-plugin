@@ -229,6 +229,8 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
     if mode == "full":
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": True})
+        monkeypatch.setattr(caps, "_probe_wake_session_return_shape",
+                            lambda: {"probe": "wake_session.return_shape", "available": True})
         monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
                             lambda: {"probe": "session_db.receipt_methods", "available": True})
         monkeypatch.setattr(caps, "_probe_session_store_lookup",
@@ -241,13 +243,16 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         # Wake primitive absent, but session index + state.db readable.
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "wake_session not present on GatewayRunner"})
+        monkeypatch.setattr(caps, "_probe_wake_session_return_shape",
+                            lambda: {"probe": "wake_session.return_shape", "available": False,
+                                     "reason": "wake_session not present on GatewayRunner"})
         monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
                             lambda: {"probe": "session_db.receipt_methods", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "missing methods: ['create_session_wake_receipt', 'update_session_wake_receipt']"})
         monkeypatch.setattr(caps, "_probe_session_store_lookup",
                             lambda: {"probe": "session_store.lookup", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "missing methods: ['lookup_by_session_key', 'lookup_by_session_id']"})
         # receipt_table probe left real: true when state_db_with_receipts present,
         # false otherwise.
         monkeypatch.setattr(caps, "_probe_session_index_readable",
@@ -255,19 +260,22 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
     elif mode == "unsupported":
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "gateway.run.GatewayRunner not importable"})
+        monkeypatch.setattr(caps, "_probe_wake_session_return_shape",
+                            lambda: {"probe": "wake_session.return_shape", "available": False,
+                                     "reason": "gateway.run.GatewayRunner not importable"})
         monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
                             lambda: {"probe": "session_db.receipt_methods", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "hermes_state.SessionDB not importable"})
         monkeypatch.setattr(caps, "_probe_session_store_lookup",
                             lambda: {"probe": "session_store.lookup", "available": False,
-                                     "reason": "not importable"})
+                                     "reason": "gateway.session.SessionStore not importable"})
         monkeypatch.setattr(caps, "_probe_receipt_table",
                             lambda hh=None: {"probe": "receipt_table", "available": False,
-                                             "reason": "absent"})
+                                             "reason": "state.db not found"})
         monkeypatch.setattr(caps, "_probe_session_index_readable",
                             lambda hh=None: {"probe": "session_index", "available": False,
-                                             "reason": "absent"})
+                                             "reason": "sessions.json not found"})
     return mode
 
 

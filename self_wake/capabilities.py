@@ -87,6 +87,44 @@ def _probe_gateway_wake_session() -> dict:
     return {"probe": "gateway.wake_session", "available": True}
 
 
+def _probe_wake_session_return_shape() -> dict:
+    """Partially detect ``wake_session`` return-contract drift.
+
+    The v1 contract returns a ``dict`` with at least ``status`` and
+    ``receipt_id`` keys (see ``wake_session`` in the core patch). The return
+    annotation is ``Dict[str, Any]`` (it does not encode the keys), so we
+    inspect the function source for those key literals. This is a conservative
+    *partial* check: it can miss a drifted host that still happens to contain
+    the literals, and it declines to fail when the source cannot be retrieved
+    (C extensions, frozen modules, ``inspect.getsource`` unavailable) rather
+    than false-positive on a real host. It exists so that return-contract
+    drift is at least partially detected — see
+    ``docs/compatibility.md`` for the version-probe limitation this addresses.
+    """
+    try:
+        from gateway.run import GatewayRunner  # type: ignore
+    except Exception:
+        return {"probe": "wake_session.return_shape", "available": False,
+                "reason": "gateway.run.GatewayRunner not importable"}
+    fn = getattr(GatewayRunner, "wake_session", None)
+    if not callable(fn):
+        return {"probe": "wake_session.return_shape", "available": False,
+                "reason": "wake_session not present on GatewayRunner"}
+    try:
+        source = inspect.getsource(fn)
+    except (OSError, TypeError):
+        # Source unavailable (C extension / frozen / not introspectable). We
+        # cannot detect drift here; decline to fail rather than false-positive.
+        return {"probe": "wake_session.return_shape", "available": True,
+                "reason": "return shape not introspectable (source unavailable)"}
+    for key in ("status", "receipt_id"):
+        if f'"{key}"' not in source and f"'{key}'" not in source:
+            return {"probe": "wake_session.return_shape", "available": False,
+                    "reason": (f"wake_session return contract drift: "
+                               f"'{key}' key not found in source")}
+    return {"probe": "wake_session.return_shape", "available": True}
+
+
 def _probe_session_db_receipt_methods() -> dict:
     """Probe for SessionDB.create/update_session_wake_receipt."""
     try:
@@ -179,6 +217,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
     """
     details = [
         _probe_gateway_wake_session(),
+        _probe_wake_session_return_shape(),
         _probe_session_db_receipt_methods(),
         _probe_session_store_lookup(),
         _probe_receipt_table(hermes_home),
@@ -187,6 +226,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
     by_probe = {d["probe"]: bool(d.get("available")) for d in details}
     wake_present = (
         by_probe.get("gateway.wake_session")
+        and by_probe.get("wake_session.return_shape")
         and by_probe.get("session_db.receipt_methods")
         and by_probe.get("session_store.lookup")
         and by_probe.get("receipt_table")
