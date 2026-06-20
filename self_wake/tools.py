@@ -1,91 +1,159 @@
-"""Tool handlers for self-wake plugin.
+"""Tool handlers for the self-wake plugin.
 
-Each handler receives (args: dict, **kwargs) and returns a JSON string.
-Handlers must catch all errors and return structured error responses.
+Each handler receives ``(args: dict, **kwargs)`` and returns a JSON string.
+Handlers catch all errors and return structured error responses — they never
+raise, per the Hermes plugin tool contract.
 """
+from __future__ import annotations
 
 import json
+import logging
+from typing import Any
+
+from . import capabilities as caps
+from . import doctor as doctor_mod
+from . import kanban as kanban_mod
+from . import receipts as receipts_mod
+from . import sessions as sessions_mod
+
+logger = logging.getLogger(__name__)
 
 
-def sessions_handler(args: dict, **kwargs) -> str:
-    """Resolve candidate target sessions.
+def _ok(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False)
 
-    Works in degraded mode by reading session index and state DB.
+
+def _err(message: str, **extra: Any) -> str:
+    payload: dict[str, Any] = {"success": False, "error": message}
+    payload.update(extra)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def sessions_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    """Resolve candidate target sessions (read-only; any capability mode)."""
+    del kwargs
+    try:
+        matches = sessions_mod.query_state_db(
+            session_id=args.get("session_id") or None,
+            session_key=args.get("session_key") or None,
+            platform=args.get("platform") or None,
+            chat_id=args.get("chat_id") or None,
+            thread_id=args.get("thread_id") or None,
+            query=args.get("query") or None,
+            limit=args.get("limit") or sessions_mod.DEFAULT_LIMIT,
+        )
+        cap = caps.probe_wake_capability()
+        return _ok({
+            "success": True,
+            "tool": "self_wake_sessions",
+            "count": len(matches),
+            "capability_mode": cap["mode"],
+            "sessions_file": str(sessions_mod._sessions_file()),
+            "sessions": matches,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("self_wake_sessions failed")
+        return _err(str(exc), tool="self_wake_sessions")
+
+
+def subscribe_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    """Create or upgrade a Kanban wake subscription (fail-closed)."""
+    del kwargs
+    try:
+        result = kanban_mod.create_wake_subscription(
+            task_id=args.get("task_id"),
+            target_session_key=args.get("session_key") or None,
+            target_session_id=args.get("session_id") or None,
+            board=args.get("board") or None,
+            platform=args.get("platform") or None,
+            chat_id=args.get("chat_id") or None,
+            thread_id=args.get("thread_id") or None,
+            notifier_profile=args.get("notifier_profile") or None,
+            reset_cursor=bool(args.get("reset_cursor")),
+            dry_run=bool(args.get("dry_run")),
+            force_degraded_visible_only=bool(args.get("force_degraded_visible_only")),
+        )
+        result.setdefault("tool", "self_wake_subscribe_kanban")
+        return _ok(result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("self_wake_subscribe_kanban failed")
+        return _err(str(exc), tool="self_wake_subscribe_kanban")
+
+
+def receipts_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    """Inspect wake receipts (capability_missing if table absent)."""
+    del kwargs
+    try:
+        result = receipts_mod.query_receipts(
+            receipt_id=args.get("receipt_id"),
+            session_key=args.get("session_key") or None,
+            session_id=args.get("session_id") or None,
+            source_kind=args.get("source_kind") or None,
+            status=args.get("status") or None,
+            dedupe_key=args.get("dedupe_key") or None,
+            limit=args.get("limit") or receipts_mod.DEFAULT_LIMIT,
+        )
+        result.setdefault("tool", "self_wake_receipts")
+        return _ok(result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("self_wake_receipts failed")
+        return _err(str(exc), tool="self_wake_receipts")
+
+
+def doctor_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    """End-to-end diagnostics for self-wake setup."""
+    del kwargs
+    try:
+        report = doctor_mod.run_diagnostics()
+        report.setdefault("tool", "self_wake_doctor")
+        return _ok(report)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("self_wake_doctor failed")
+        return _err(str(exc), tool="self_wake_doctor", ok=False,
+                    failures=[f"doctor crashed: {exc}"], warnings=[],
+                    remediation=["report this crash to the plugin maintainer"])
+
+
+def record_recent_session(session_id: str = "", platform: str = "",
+                          sender_id: str = "", **kwargs: Any) -> None:
+    """Best-effort ``pre_llm_call`` observer ledger.
+
+    Returns ``None`` so it never injects prompt context (prompt-cache safe).
+    The ledger is local operator diagnostics only; it is not required for wake
+    correctness. Failures are swallowed.
     """
-    # TODO: implement session discovery
-    # - Read $HERMES_HOME/sessions/sessions.json
-    # - Query $HERMES_HOME/state.db
-    # - Use SessionStore data if host capability present
-    # - Return structured results with source paths, match confidence, origin info
-    return json.dumps({
-        "success": False,
-        "error": "not_implemented",
-        "tool": "self_wake_sessions",
-    })
+    del kwargs
+    if not session_id:
+        return None
+    try:
+        import json as _json
+        from datetime import datetime, timezone
 
-
-def subscribe_handler(args: dict, **kwargs) -> str:
-    """Create or upgrade a Kanban wake subscription.
-
-    Fails closed with capability_missing if host lacks internal_session_wake_v1.
-    """
-    # TODO: implement
-    # - Probe host capability
-    # - If missing and not dry_run, return capability_missing error
-    # - Resolve target session
-    # - If ambiguous, return matches without writing
-    # - Use hermes_cli.kanban_db.add_notify_sub when available
-    # - Parameterized SQL only for cursor reset/verification
-    # - Report before/after for upgrades
-    return json.dumps({
-        "success": False,
-        "error": "not_implemented",
-        "tool": "self_wake_subscribe_kanban",
-    })
-
-
-def receipts_handler(args: dict, **kwargs) -> str:
-    """Inspect wake receipts.
-
-    Returns capability_missing if session_wake_receipts table is absent.
-    """
-    # TODO: implement
-    # - Check session_wake_receipts table exists
-    # - If missing, return capability_missing with remediation
-    # - Query receipts with filters
-    # - Redact/truncate payload preview
-    return json.dumps({
-        "success": False,
-        "error": "not_implemented",
-        "tool": "self_wake_receipts",
-    })
-
-
-def doctor_handler(args: dict, **kwargs) -> str:
-    """End-to-end diagnostics for self-wake setup.
-
-    Checks: plugin enabled, toolset enabled, core capability, session index,
-    receipt table, Kanban DB, cron config, wake subscriptions, gateway adapters.
-    """
-    # TODO: implement
-    # - Check plugin loaded/enabled
-    # - Check toolset exposed for current platform
-    # - Probe host capability (version)
-    # - Check session index readability
-    # - Check state.db receipt table
-    # - Check Kanban DB reachable
-    # - Check cron config wake_agent_on_delivery
-    # - List existing wake subscriptions
-    # - Check target session origin completeness
-    # - Check live gateway/adapters when in gateway
-    # - Return structured JSON: ok, mode, failures, warnings, remediation
-    return json.dumps({
-        "success": False,
-        "error": "not_implemented",
-        "tool": "self_wake_doctor",
-        "mode": "unsupported",
-        "ok": False,
-        "failures": ["plugin not yet implemented"],
-        "warnings": [],
-        "remediation": "implement tool handlers per architecture doc",
-    })
+        sessions = sessions_mod.read_sessions_index()
+        found_key = ""
+        found_entry = None
+        for key, entry in sessions.items():
+            if str(entry.get("session_id") or "") == str(session_id):
+                found_key = key
+                found_entry = entry
+                break
+        path = sessions_mod._hermes_home() / "self-wake" / "recent_sessions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        except Exception:
+            data = []
+        if not isinstance(data, list):
+            data = []
+        summary = sessions_mod._entry_summary(
+            found_key, found_entry or {"session_id": session_id, "platform": platform})
+        summary["observed_at"] = datetime.now(timezone.utc).isoformat()
+        summary["sender_id"] = sender_id or ""
+        data = [x for x in data
+                if not (isinstance(x, dict) and x.get("session_id") == session_id)]
+        data.insert(0, summary)
+        path.write_text(_json.dumps(data[:100], indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("self-wake: recent session hook failed: %s", exc)
+    return None

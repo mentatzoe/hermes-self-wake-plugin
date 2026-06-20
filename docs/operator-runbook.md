@@ -32,8 +32,8 @@ Run `/self-wake doctor` to check:
 ### Check if a wake fired
 
 ```
-/self-wake receipts --task-id t_abc123
 /self-wake receipts --source-kind kanban --status agent_responded
+/self-wake receipts --session-key "agent:main:discord:thread:..."
 ```
 
 ### Troubleshoot

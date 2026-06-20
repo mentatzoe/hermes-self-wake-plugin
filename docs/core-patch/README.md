@@ -1,7 +1,15 @@
 # Core Patch: internal_session_wake_v1
 
-This directory contains a clean, upstream-ready patch series that
+This directory contains a clean, upstream-candidate patch artifact that
 implements the host capability required by the self-wake plugin.
+
+The patch is generated from Zoe's local Hermes wake commits and is included as
+a reviewable artifact only. The plugin never applies or monkeypatches Hermes
+core by itself.
+
+- Patch file: `0001-internal-session-wake-v1.patch`
+- Base commit: `b7f0c9cd52febc32f4d2fb6205f3291c9e7bcf98`
+- Source commits: `3d122a1ac`, `62e0f2e52`, `489720101`, `f45057c48`, `4a9087b67`, `1d5b98c39`
 
 ## What the patch does
 

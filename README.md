@@ -8,14 +8,20 @@ to Hermes' internal session wake capability.
 
 ## Status
 
-**Scaffold only** — plugin logic not yet implemented.
+**Implemented (v1, Option 2)** — plugin logic implemented per the architecture
+design (Option 2: standalone plugin + documented `internal_session_wake_v1`
+core dependency + clean upstream core patch artifact). Unit tests pass against
+a temp `HERMES_HOME`. No Hermes core files are touched by the plugin; the host
+wake kernel lives in the separate patch under `docs/core-patch/`.
 
 ## Host Dependency
 
 This plugin requires the Hermes host capability `internal_session_wake_v1`.
-Without it, wake-mutating operations (subscribe, receipt inspection) will fail
-closed with `capability_missing`. Session discovery and partial diagnostics
-work in degraded (`inspect_only`) mode.
+Without it, wake-mutating operations (subscribe with a `session:`/`session_id:`
+marker) fail closed with `capability_missing`. Session discovery, receipt
+inspection (when the table exists), and diagnostics work in degraded
+(`inspect_only`) mode. Receipt inspection returns `capability_missing` only
+when the `session_wake_receipts` table is absent.
 
 See `docs/compatibility.md` for the full compatibility matrix.
 
