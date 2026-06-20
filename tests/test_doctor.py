@@ -67,10 +67,15 @@ def test_doctor_check_names_cover_required_surfaces(full_capability,
 # --------------------------------------------------------------------------- #
 # H1: kanban_db diagnostic must not be tautologically ok
 # --------------------------------------------------------------------------- #
-def test_doctor_kanban_db_fails_when_backend_unavailable(hermes_home):
+def test_doctor_kanban_db_fails_when_backend_unavailable(hermes_home, monkeypatch):
     """When the Kanban backend is unavailable (hermes_cli not importable),
     the kanban_db check must report "fail" — not a false-positive "ok, 0 subs"
     (review H1: the old ``subs or True`` check could never report fail)."""
+    from self_wake import kanban as kanban_mod
+    monkeypatch.setattr(
+        kanban_mod, "try_default_backend",
+        lambda: (None, "simulated: hermes_cli.kanban_db not importable"),
+    )
     result = doctor.run_diagnostics()
     kanban_db = next(c for c in result["checks"] if c["name"] == "kanban_db")
     assert kanban_db["status"] == "fail"
