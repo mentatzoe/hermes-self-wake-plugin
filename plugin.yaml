@@ -1,0 +1,18 @@
+name: self-wake
+version: "1.0.0"
+description: Formal operator tools for Hermes internal session wake routing.
+provides_tools:
+  - self_wake_sessions
+  - self_wake_subscribe_kanban
+  - self_wake_receipts
+  - self_wake_doctor
+provides_hooks:
+  - pre_llm_call
+provides_commands:
+  - self-wake
+provides_skills:
+  - kanban-self-wake
+metadata:
+  hermes:
+    requires_capabilities:
+      internal_session_wake: ">=1"

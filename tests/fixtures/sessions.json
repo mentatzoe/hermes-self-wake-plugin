@@ -1,0 +1,11 @@
+[
+  {
+    "session_key": "agent:test:discord:channel:123:456",
+    "session_id": "20260101_120000_abcdef",
+    "platform": "discord",
+    "chat_id": "123",
+    "thread_id": "456",
+    "title": "Test Session",
+    "created_at": "2026-01-01T12:00:00Z"
+  }
+]
