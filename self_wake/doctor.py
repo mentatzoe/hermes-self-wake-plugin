@@ -1,7 +1,7 @@
 """End-to-end diagnostics for the self-wake plugin.
 
 Provides a single structured report covering plugin health, host capability,
-session index readability, receipt table, Kanban DB reachability, cron config,
+session resolver readability, receipt table, Kanban DB reachability, cron config,
 existing wake subscriptions, and recent receipt failures. Designed for both
 operators (``/self-wake doctor``) and downstream agents/tools.
 """
@@ -223,16 +223,20 @@ def run_diagnostics(
     if shim_info["status"] == "fail":
         warnings.append(shim_detail)
 
-    # 2. Session index readable
-    sessions_index = sessions_mod.read_sessions_index(hermes_home)
-    n_sessions = len(sessions_index)
+    # 2. Host session resolver readable
+    resolver_entries = sessions_mod.read_current_session_cache(hermes_home)
+    n_sessions = len(resolver_entries)
     checks.append(_check(
-        "session_index", "ok" if n_sessions > 0 else "warn",
-        f"{n_sessions} session(s) in sessions.json",
+        "session_resolver", "ok" if n_sessions > 0 else "warn",
+        f"{n_sessions} session(s) via current_session_cache_adapter",
     ))
     if n_sessions == 0:
-        warnings.append("session index empty or missing; wake targets cannot be resolved")
-        remediation.append("Ensure $HERMES_HOME/sessions/sessions.json exists and is a dict.")
+        warnings.append("session resolver empty or unavailable; wake targets cannot be resolved")
+        remediation.append(
+            "Ensure the Hermes gateway has at least one current session and its "
+            "current-session cache exists; future host resolver adapters can "
+            "replace this current-Hermes fallback."
+        )
 
     # 3. Receipt table present + counts
     rcounts = receipts_mod.receipt_status_counts(hermes_home)

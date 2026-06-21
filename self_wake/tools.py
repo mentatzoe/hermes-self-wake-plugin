@@ -33,7 +33,7 @@ def sessions_handler(args: dict[str, Any], **kwargs: Any) -> str:
     """Resolve candidate target sessions (read-only; any capability mode)."""
     del kwargs
     try:
-        matches = sessions_mod.query_state_db(
+        matches = sessions_mod.query_host_sessions(
             session_id=args.get("session_id") or None,
             session_key=args.get("session_key") or None,
             platform=args.get("platform") or None,
@@ -48,7 +48,7 @@ def sessions_handler(args: dict[str, Any], **kwargs: Any) -> str:
             "tool": "self_wake_sessions",
             "count": len(matches),
             "capability_mode": cap["mode"],
-            "sessions_file": str(sessions_mod._sessions_file()),
+            "resolver_source": sessions_mod.resolver_source(),
             "sessions": matches,
         })
     except Exception as exc:  # noqa: BLE001
@@ -116,11 +116,11 @@ def doctor_handler(args: dict[str, Any], **kwargs: Any) -> str:
 
 def record_recent_session(session_id: str = "", platform: str = "",
                           sender_id: str = "", **kwargs: Any) -> None:
-    """Best-effort ``pre_llm_call`` observer ledger.
+    """Best-effort ``pre_llm_call`` recent-session diagnostics cache.
 
     Returns ``None`` so it never injects prompt context (prompt-cache safe).
-    The ledger is local operator diagnostics only; it is not required for wake
-    correctness. Failures are swallowed.
+    The cache is local operator diagnostics only; it is not a canonical ledger
+    and is not required for wake correctness. Failures are swallowed.
     """
     del kwargs
     if not session_id:
@@ -129,7 +129,7 @@ def record_recent_session(session_id: str = "", platform: str = "",
         import json as _json
         from datetime import datetime, timezone
 
-        sessions = sessions_mod.read_sessions_index()
+        sessions = sessions_mod.read_current_session_cache()
         found_key = ""
         found_entry = None
         for key, entry in sessions.items():

@@ -1,8 +1,16 @@
-"""Session index reader/resolver for the self-wake plugin.
+"""Host-session resolver adapter for the self-wake plugin.
 
-Reads session data from ``$HERMES_HOME/sessions/sessions.json`` (a dict keyed
-by gateway session key) and ``$HERMES_HOME/state.db`` (session titles/last
-message) to resolve candidate wake target sessions.
+The public plugin contract is *not* ``$HERMES_HOME/sessions/sessions.json``.
+The public contract is "resolve an existing Hermes session to a wake target".
+
+Current Hermes does not yet expose a stable resolver API for plugins, so this
+module ships a read-only adapter over the gateway current-session cache
+(``$HERMES_HOME/sessions/sessions.json``, a dict keyed by gateway session key)
+plus ``$HERMES_HOME/state.db`` for optional title/last-message metadata. That
+cache is current Hermes implementation detail and active-routing state, not a
+canonical historical ledger. If Hermes later exposes a native resolver or
+``session_surfaces`` table, the adapter should be swapped behind these helpers
+without changing the model-facing tools.
 
 This is a *read-only* discovery surface. It works in both ``full`` and
 ``inspect_only`` capability modes; it never wakes anything. All Hermes
@@ -25,14 +33,30 @@ logger = logging.getLogger(__name__)
 # larger explicit limit (bounded by _safe_int to a hard cap).
 DEFAULT_LIMIT = 10
 HARD_LIMIT = 50
+CURRENT_RESOLVER_SOURCE = "current_session_cache_adapter"
 
 
-def _sessions_file(hermes_home: str | Path | None = None) -> Path:
+def _current_session_cache_file(hermes_home: str | Path | None = None) -> Path:
+    """Current Hermes gateway current-session cache path.
+
+    Compatibility note: this path is the current-Hermes adapter substrate, not
+    the plugin's public resolver contract.
+    """
     return _hermes_home(hermes_home) / "sessions" / "sessions.json"
 
 
 def _state_db(hermes_home: str | Path | None = None) -> Path:
     return _hermes_home(hermes_home) / "state.db"
+
+
+def resolver_source(hermes_home: str | Path | None = None) -> dict[str, Any]:
+    """Describe the active session-resolver adapter for diagnostics."""
+    return {
+        "kind": CURRENT_RESOLVER_SOURCE,
+        "current_session_cache": str(_current_session_cache_file(hermes_home)),
+        "metadata_db": str(_state_db(hermes_home)),
+        "contract": "host session resolver adapter; cache path is not public API",
+    }
 
 
 def _safe_int(value: Any, default: int, *, lo: int = 1, hi: int = HARD_LIMIT) -> int:
@@ -43,19 +67,19 @@ def _safe_int(value: Any, default: int, *, lo: int = 1, hi: int = HARD_LIMIT) ->
     return max(lo, min(hi, n))
 
 
-def read_sessions_index(hermes_home: str | Path | None = None) -> dict[str, dict[str, Any]]:
-    """Read the sessions index from ``sessions.json``.
+def read_current_session_cache(hermes_home: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """Read the current-Hermes gateway current-session cache.
 
     Returns a dict keyed by session_key -> entry dict. Returns an empty dict
-    when the file is missing, unreadable, or not a dict. Never raises.
+    when the cache is missing, unreadable, or not a dict. Never raises.
     """
-    path = _sessions_file(hermes_home)
+    path = _current_session_cache_file(hermes_home)
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("self-wake: failed to read %s: %s", path, exc)
+        logger.warning("self-wake: failed to read current-session cache %s: %s", path, exc)
         return {}
     if isinstance(data, dict):
         return {str(k): v for k, v in data.items() if isinstance(v, dict)}
@@ -101,8 +125,8 @@ def _load_session_titles(session_ids: Iterable[str],
 
     Returns {session_id: {title, message_count, started_at, last_message_at,
     last_message}}. Returns {} if state.db is missing or unreadable. The
-    sessions/messages schema is the canonical Hermes session store schema; if
-    it changes, this degrades to {} (caller still has sessions.json data).
+    sessions/messages schema is Hermes transcript metadata; if it changes, this
+    degrades to {} (caller still has current-session-cache origin data).
     """
     ids = [sid for sid in session_ids if sid]
     db = _state_db(hermes_home)
@@ -140,21 +164,22 @@ def _load_session_titles(session_ids: Iterable[str],
         return {}
 
 
-def query_state_db(hermes_home: str | Path | None = None,
-                   session_id: str | None = None,
-                   session_key: str | None = None,
-                   platform: str | None = None,
-                   chat_id: str | None = None,
-                   thread_id: str | None = None,
-                   query: str | None = None,
-                   limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """Resolve candidate sessions from the sessions.json index + state.db titles.
+def query_host_sessions(hermes_home: str | Path | None = None,
+                        session_id: str | None = None,
+                        session_key: str | None = None,
+                        platform: str | None = None,
+                        chat_id: str | None = None,
+                        thread_id: str | None = None,
+                        query: str | None = None,
+                        limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
+    """Resolve candidate sessions through the active host resolver adapter.
 
+    Current adapter: gateway current-session cache + state.db title metadata.
     All filters are optional and AND-combined. ``query`` is a case-insensitive
     substring over the entry summary JSON. Returns at most ``limit`` summaries
     (bounded by HARD_LIMIT), most-recently-updated first.
     """
-    sessions = read_sessions_index(hermes_home)
+    sessions = read_current_session_cache(hermes_home)
     limit = _safe_int(limit, DEFAULT_LIMIT)
     ids = [str(e.get("session_id") or "") for e in sessions.values()]
     title_meta = _load_session_titles(ids, hermes_home)
@@ -205,7 +230,7 @@ def resolve_target_session(
     limit: int = DEFAULT_LIMIT,
     hermes_home: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Resolve candidate target sessions from the index and/or state DB.
+    """Resolve candidate target sessions through the host resolver adapter.
 
     Returns a list of entry summaries. If ``session_key`` resolves to exactly
     one entry, returns a single-element list. If filters match multiple
@@ -214,7 +239,7 @@ def resolve_target_session(
     carrying just the key (the caller may intentionally target a key not yet
     seen in this profile).
     """
-    sessions = read_sessions_index(hermes_home)
+    sessions = read_current_session_cache(hermes_home)
     session_key = (session_key or "").strip()
     session_id = (session_id or "").strip()
 
@@ -225,15 +250,15 @@ def resolve_target_session(
             str(entry.get("session_id") or ""), {})
         return [_entry_summary(session_key, entry, db_meta)]
 
-    matches = query_state_db(hermes_home, session_id=session_id,
-                             session_key=session_key or None, platform=platform,
-                             chat_id=chat_id, thread_id=thread_id, query=query,
-                             limit=limit)
+    matches = query_host_sessions(hermes_home, session_id=session_id,
+                                  session_key=session_key or None, platform=platform,
+                                  chat_id=chat_id, thread_id=thread_id, query=query,
+                                  limit=limit)
     if matches:
         return matches
 
-    # Caller-targeted key not yet in the index: preserve it so subscribe can
-    # still build a session: marker, but report no resolved origin.
+    # Caller-targeted key not yet in the current cache: preserve it so subscribe
+    # can still build a session: marker, but report no resolved origin.
     if session_key and not session_id:
         return [{
             "session_key": session_key,
@@ -249,7 +274,7 @@ def resolve_target_session(
             "last_message_at": "",
             "last_message_preview": "",
             "origin": {},
-            "resolved_from_index": False,
+            "resolved_from_cache": False,
         }]
     return []
 
@@ -257,8 +282,8 @@ def resolve_target_session(
 def is_ambiguous(matches: list[dict[str, Any]]) -> bool:
     """True when ``matches`` represents an ambiguous resolution (>1 candidate).
 
-    A single match, or a single caller-supplied key with no index entry, is not
-    ambiguous. Two or more index matches is ambiguous.
+    A single match, or a single caller-supplied key with no current-cache entry,
+    is not ambiguous. Two or more cache matches is ambiguous.
     """
     if len(matches) <= 1:
         return False

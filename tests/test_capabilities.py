@@ -17,7 +17,7 @@ def test_probe_returns_structured_result(hermes_home):
 
 
 def test_unsupported_mode_when_nothing_readable(monkeypatch, tmp_path):
-    """Empty HERMES_HOME with no sessions.json and no state.db → unsupported."""
+    """Empty HERMES_HOME with no current-session cache and no state.db → unsupported."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty"))
     # Force all structural probes to absent.
     monkeypatch.setattr(caps, "_probe_gateway_wake_session",
@@ -32,9 +32,9 @@ def test_unsupported_mode_when_nothing_readable(monkeypatch, tmp_path):
     assert cap["version"] is None
 
 
-def test_inspect_only_mode_when_index_readable_but_no_wake(
+def test_inspect_only_mode_when_resolver_readable_but_no_wake(
         inspect_only_capability, hermes_home):
-    """Read-only host: session index present, wake primitive absent."""
+    """Read-only host: session resolver present, wake primitive absent."""
     cap = caps.probe_wake_capability()
     assert cap["mode"] == "inspect_only"
     assert cap["available"] is False
@@ -87,9 +87,9 @@ def test_receipt_table_probe_absent(hermes_home):
     assert result["available"] is False
 
 
-def test_session_index_probe_dict_format(hermes_home):
-    from self_wake.capabilities import _probe_session_index_readable
-    assert _probe_session_index_readable()["available"] is True
+def test_session_resolver_probe_dict_format(hermes_home):
+    from self_wake.capabilities import _probe_session_resolver_readable
+    assert _probe_session_resolver_readable()["available"] is True
 
 
 def test_probe_wake_session_return_shape_detects_drift(monkeypatch):
@@ -143,8 +143,8 @@ def test_return_shape_drift_downgrades_from_full(monkeypatch, tmp_path):
                         lambda: {"probe": "session_store.lookup", "available": True})
     monkeypatch.setattr(caps, "_probe_receipt_table",
                         lambda hh=None: {"probe": "receipt_table", "available": True})
-    monkeypatch.setattr(caps, "_probe_session_index_readable",
-                        lambda hh=None: {"probe": "session_index", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_resolver_readable",
+                        lambda hh=None: {"probe": "session_resolver", "available": True})
     monkeypatch.setattr(caps, "_probe_notifier_routing",
                         lambda: {"probe": "notifier_routing", "available": True})
     cap = caps.probe_wake_capability()
@@ -169,8 +169,8 @@ def test_notifier_routing_drift_downgrades_from_full(monkeypatch, tmp_path):
                         lambda: {"probe": "session_store.lookup", "available": True})
     monkeypatch.setattr(caps, "_probe_receipt_table",
                         lambda hh=None: {"probe": "receipt_table", "available": True})
-    monkeypatch.setattr(caps, "_probe_session_index_readable",
-                        lambda hh=None: {"probe": "session_index", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_resolver_readable",
+                        lambda hh=None: {"probe": "session_resolver", "available": True})
     monkeypatch.setattr(caps, "_probe_notifier_routing",
                         lambda: {"probe": "notifier_routing", "available": False,
                                  "reason": "_kanban_notifier_watcher does not route session: markers through wake_session"})

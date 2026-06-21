@@ -11,7 +11,7 @@ Run end-to-end diagnostics:
 The doctor checks:
 - `core_capability` — `internal_session_wake_v1` present and version, with `source` (native/shim/absent)
 - `compat_shim` — compat shim status (installed / disabled / native-present / drift-fail)
-- `session_index` — `sessions.json` readable and non-empty
+- `session_resolver` — host session resolver readable and non-empty (current adapter: gateway current-session cache + `state.db`)
 - `receipt_table` — `session_wake_receipts` present and counts
 - `kanban_db` — Kanban DB reachable and existing subscriptions
 - `cron_wake_config` — `cron.wake_agent_on_delivery` state
@@ -43,7 +43,7 @@ Filter by platform, chat, or thread:
 /self-wake sessions --platform discord --chat-id 123456 --thread-id 789012
 ```
 
-The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, `display_name`, `title`, and `origin`.
+The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, `display_name`, `title`, `origin`, and a top-level `resolver_source` object. On current Hermes that resolver source is `current_session_cache_adapter`; the cache path is diagnostic detail, not the plugin's public contract.
 
 ### Discord thread session-key shape
 
@@ -200,7 +200,7 @@ changed shape on this Hermes version.
 1. Verify the Kanban task actually reached terminal state (done, blocked, etc.)
 2. Check `kanban_notify_subs` has the correct `user_id=session:...` marker
 3. Run `/self-wake receipts --source-kind kanban` without status filter to see all rows
-4. Run `/self-wake doctor` and check `kanban_db` and `session_index`
+4. Run `/self-wake doctor` and check `kanban_db` and `session_resolver`
 
 ### Subscribe fails silently
 
@@ -225,16 +225,20 @@ changed shape on this Hermes version.
 2. Check that `~/.hermes/kanban.db` (or the board-specific DB) exists
 3. Restart Hermes / gateway
 
-### Session index empty
+### Session resolver empty
 
-**Symptom:** `session_index` check shows `warn` with 0 sessions.
+**Symptom:** `session_resolver` check shows `warn` with 0 sessions.
 
-**Cause:** `sessions.json` is missing or empty.
+**Cause:** The active host resolver has no current session entries. On current
+Hermes, the bundled fallback adapter reads the gateway current-session cache at
+`$HERMES_HOME/sessions/sessions.json`; that cache may be missing, empty, or not
+yet populated by the gateway.
 
 **Fix:**
 1. Ensure at least one gateway session has been created
-2. Check that `$HERMES_HOME/sessions/sessions.json` exists and is a dict keyed by session_key
-3. Restart the gateway to regenerate the index
+2. On current Hermes, check that the gateway current-session cache exists and is a dict keyed by session_key
+3. Restart the gateway to regenerate the cache
+4. If your Hermes install exposes a future native resolver/session-surfaces API, update the plugin adapter instead of treating the cache path as the durable contract
 
 ## Rollback
 

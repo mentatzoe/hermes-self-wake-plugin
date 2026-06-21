@@ -74,8 +74,8 @@ def register(ctx) -> None:
     )
 
     # Observer-only pre_llm_call hook. Returns None so it never injects prompt
-    # context (prompt-cache safe); it only maintains a local recent-sessions
-    # ledger for operator diagnostics.
+    # context (prompt-cache safe); it only maintains a local recent-session
+    # diagnostics cache for operators.
     ctx.register_hook("pre_llm_call", tools.record_recent_session)
 
     ctx.register_command(

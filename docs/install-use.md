@@ -110,7 +110,7 @@ Expected output in `full` mode:
 - `mode: full`
 - `core_capability: ok` (with `source=native` or `source=shim`)
 - `compat_shim: ok` (if using the shim) or `info` (if native/disabled)
-- `session_index: ok` (non-zero sessions)
+- `session_resolver: ok` (non-zero sessions via host resolver; current adapter uses the gateway current-session cache)
 - `receipt_table: ok`
 - `kanban_db: ok`
 
@@ -130,7 +130,7 @@ Or by query:
 /self-wake sessions --query "kanban worker"
 ```
 
-The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, and `origin`.
+The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, `origin`, and a top-level `resolver_source` object. On current Hermes the resolver source is a fallback adapter over the gateway current-session cache, not a portable public file contract.
 
 ## 8. Subscribe a Kanban task to internal wake
 

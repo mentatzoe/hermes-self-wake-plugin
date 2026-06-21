@@ -59,7 +59,7 @@ def test_doctor_check_names_cover_required_surfaces(full_capability,
     """Doctor checks cover the design's required diagnostic surfaces."""
     result = doctor.run_diagnostics(backend=kanban_backend)
     names = {c["name"] for c in result["checks"]}
-    for required in ("core_capability", "session_index", "receipt_table",
+    for required in ("core_capability", "session_resolver", "receipt_table",
                      "kanban_db", "cron_wake_config"):
         assert required in names
 
@@ -93,21 +93,21 @@ def test_doctor_kanban_db_ok_with_zero_subs_when_available(
 
 
 # --------------------------------------------------------------------------- #
-# M1: session_index should be ok only when n_sessions > 0
+# M1: session_resolver should be ok only when n_sessions > 0
 # --------------------------------------------------------------------------- #
-def test_doctor_session_index_warns_when_empty(full_capability,
-                                                state_db_with_receipts,
-                                                kanban_backend, hermes_home,
-                                                monkeypatch):
-    """An empty/missing session index is "warn", not a misleading "ok"
+def test_doctor_session_resolver_warns_when_empty(full_capability,
+                                                  state_db_with_receipts,
+                                                  kanban_backend, hermes_home,
+                                                  monkeypatch):
+    """An empty/missing resolver cache is "warn", not a misleading "ok"
     (review M1: the old ``n_sessions >= 0`` check was always ok)."""
     from self_wake import sessions as sessions_mod
-    monkeypatch.setattr(sessions_mod, "read_sessions_index",
+    monkeypatch.setattr(sessions_mod, "read_current_session_cache",
                         lambda hh=None: {})
     result = doctor.run_diagnostics(backend=kanban_backend)
-    si = next(c for c in result["checks"] if c["name"] == "session_index")
-    assert si["status"] == "warn"
-    assert any("session index empty" in w for w in result["warnings"])
+    sr = next(c for c in result["checks"] if c["name"] == "session_resolver")
+    assert sr["status"] == "warn"
+    assert any("session resolver empty" in w for w in result["warnings"])
 
 
 # --------------------------------------------------------------------------- #

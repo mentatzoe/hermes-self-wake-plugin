@@ -18,6 +18,8 @@ def test_sessions_handler_returns_json(hermes_home):
     assert result["tool"] == "self_wake_sessions"
     assert result["count"] == 1
     assert "capability_mode" in result
+    assert result["resolver_source"]["kind"] == "current_session_cache_adapter"
+    assert "sessions_file" not in result
 
 
 def test_sessions_handler_no_uncaught_exception_on_bad_args(hermes_home):

@@ -29,7 +29,7 @@ capability.
 | Mode | Host State | Behavior |
 |------|-----------|----------|
 | `full` | `internal_session_wake_v1` present (native **or** shim) + receipt table + notifier routing | All tools available |
-| `inspect_only` | Wake primitive absent, DBs readable | Discovery + partial doctor |
+| `inspect_only` | Wake primitive absent, session resolver or DB metadata readable | Discovery + partial doctor |
 | `unsupported` | Required files/DBs missing/unreadable | Doctor reports setup issue |
 
 A `full`-mode determination requires **both** the capability surface
@@ -44,11 +44,21 @@ the surface but not the routing is reported as `inspect_only`, so
 | Feature | Minimum Requirement |
 |---------|-------------------|
 | Plugin install + doctor | Any recent Hermes |
-| Session discovery | Hermes with sessions.json + state.db |
+| Session discovery | A host session resolver. Current bundled adapter reads Hermes' gateway current-session cache (`sessions/sessions.json`) plus `state.db`; that cache path is not a public plugin contract. |
 | Kanban wake subscribe | `internal_session_wake_v1` (native or **shim**) + `session_wake_receipts` table |
 | Receipt inspection | `session_wake_receipts` table (created by shim or native) |
 | Cron wake | Optional core patch only (not provided by the shim) |
 | Send-message mirror wake | Optional core patch only (not provided by the shim) |
+
+## Session resolver boundary
+
+`self_wake_sessions` is intentionally resolver-neutral at the tool boundary. The
+current implementation includes a fallback adapter for today's Hermes gateway
+current-session cache (`$HERMES_HOME/sessions/sessions.json`) and uses `state.db`
+only for extra title/preview metadata. That cache is active routing state, not a
+canonical history ledger and not a public contract for all Hermes operators. A
+future native resolver or `session_surfaces` adapter should replace the cache
+adapter behind `self_wake.sessions` without changing the operator-facing tool.
 
 ## Fail-Closed Behavior
 

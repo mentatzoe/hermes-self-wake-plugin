@@ -16,6 +16,17 @@ on vanilla Hermes when enabled.
 pass against a temp `HERMES_HOME`. No Hermes core files are touched unless the
 operator explicitly chooses the optional reference core patch.
 
+## Session discovery boundary
+
+`self_wake_sessions` exposes a host-session resolver, not a public dependency on
+Hermes' current cache file. Current Hermes does not yet expose a stable plugin
+resolver API, so this PR includes a read-only **current-Hermes adapter** over the
+gateway current-session cache (`$HERMES_HOME/sessions/sessions.json`) plus
+`state.db` metadata. That cache is active gateway routing state, not a canonical
+history ledger and not the plugin contract. If Hermes later exposes a native
+resolver or `session_surfaces` table, the adapter should move behind the same
+`self_wake.sessions` helper surface.
+
 ## How the wake capability is provided (portability model)
 
 The plugin needs the Hermes host capability `internal_session_wake_v1`. It can
@@ -76,10 +87,10 @@ both the shim path and the optional core-patch path.
 
 | Tool | Purpose | Capability required |
 |------|---------|-------------------|
-| `self_wake_sessions` | Resolve candidate target sessions from `sessions.json` + `state.db` | None (read-only) |
+| `self_wake_sessions` | Resolve candidate target sessions through the host-session resolver (current adapter: gateway current-session cache + `state.db`) | None (read-only) |
 | `self_wake_subscribe_kanban` | Create/upgrade Kanban wake subscriptions with `session:` or `session_id:` markers | `internal_session_wake_v1` (native or shim) |
 | `self_wake_receipts` | Inspect wake receipts from `session_wake_receipts` | Receipt table present (shim or native) |
-| `self_wake_doctor` | End-to-end diagnostics: capability, shim, session index, receipts, Kanban DB, cron config | None (degraded reporting) |
+| `self_wake_doctor` | End-to-end diagnostics: capability, shim, session resolver, receipts, Kanban DB, cron config | None (degraded reporting) |
 
 ## Slash Command
 

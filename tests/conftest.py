@@ -2,7 +2,7 @@
 
 All tests run against a temp HERMES_HOME — never the real ~/.hermes. The
 fixtures here provide:
-  - a populated sessions.json index
+  - a populated current-session cache at sessions/sessions.json
   - a state.db with the session_wake_receipts / sessions / messages tables
   - an in-memory SQLite KanbanBackend double mirroring hermes_cli.kanban_db
   - monkeypatchable capability-probe helpers for full / inspect-only / unsupported
@@ -121,7 +121,7 @@ class SQLiteKanbanBackend:
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
 def hermes_home(tmp_path, monkeypatch):
-    """A temp HERMES_HOME with a populated sessions.json index."""
+    """A temp HERMES_HOME with a populated gateway current-session cache."""
     home = tmp_path / "hermes"
     (home / "sessions").mkdir(parents=True)
     sessions_data = json.loads((FIXTURES / "sessions.json").read_text(encoding="utf-8"))
@@ -237,12 +237,12 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
                             lambda: {"probe": "session_store.lookup", "available": True})
         monkeypatch.setattr(caps, "_probe_receipt_table",
                             lambda hh=None: {"probe": "receipt_table", "available": True})
-        monkeypatch.setattr(caps, "_probe_session_index_readable",
-                            lambda hh=None: {"probe": "session_index", "available": True})
+        monkeypatch.setattr(caps, "_probe_session_resolver_readable",
+                            lambda hh=None: {"probe": "session_resolver", "available": True})
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": True})
     elif mode == "inspect_only":
-        # Wake primitive absent, but session index + state.db readable.
+        # Wake primitive absent, but session resolver + state.db readable.
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": False,
                                      "reason": "wake_session not present on GatewayRunner"})
@@ -257,8 +257,8 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
                                      "reason": "missing methods: ['lookup_by_session_key', 'lookup_by_session_id']"})
         # receipt_table probe left real: true when state_db_with_receipts present,
         # false otherwise.
-        monkeypatch.setattr(caps, "_probe_session_index_readable",
-                            lambda hh=None: {"probe": "session_index", "available": True})
+        monkeypatch.setattr(caps, "_probe_session_resolver_readable",
+                            lambda hh=None: {"probe": "session_resolver", "available": True})
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": False,
                                      "reason": "_kanban_internal_wake_target not present on mixin"})
@@ -278,9 +278,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         monkeypatch.setattr(caps, "_probe_receipt_table",
                             lambda hh=None: {"probe": "receipt_table", "available": False,
                                              "reason": "state.db not found"})
-        monkeypatch.setattr(caps, "_probe_session_index_readable",
-                            lambda hh=None: {"probe": "session_index", "available": False,
-                                             "reason": "sessions.json not found"})
+        monkeypatch.setattr(caps, "_probe_session_resolver_readable",
+                            lambda hh=None: {"probe": "session_resolver", "available": False,
+                                             "reason": "gateway current-session cache not found"})
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": False,
                                      "reason": "gateway.kanban_watchers.GatewayKanbanWatchersMixin not importable"})

@@ -1,12 +1,12 @@
-"""Tests for session discovery / resolution."""
+"""Tests for host-session discovery / resolution."""
 from __future__ import annotations
 
 from self_wake import sessions
 
 
-def test_read_sessions_index_returns_dict_keyed_by_session_key(hermes_home):
-    """sessions.json is a dict keyed by session_key (real Hermes format)."""
-    idx = sessions.read_sessions_index()
+def test_read_current_session_cache_returns_dict_keyed_by_session_key(hermes_home):
+    """Current-Hermes cache is a dict keyed by session_key."""
+    idx = sessions.read_current_session_cache()
     assert isinstance(idx, dict)
     assert "agent:main:discord:thread:1511162896762142980:1511162896762142980" in idx
     # Each value is an entry dict with session_id.
@@ -14,10 +14,17 @@ def test_read_sessions_index_returns_dict_keyed_by_session_key(hermes_home):
     assert entry["session_id"] == "20260101_120000_aaaaaa"
 
 
-def test_read_sessions_index_missing_file(tmp_path, monkeypatch):
-    """Missing sessions.json yields an empty dict, never raises."""
+def test_read_current_session_cache_missing_file(tmp_path, monkeypatch):
+    """Missing current-session cache yields an empty dict, never raises."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "nope"))
-    assert sessions.read_sessions_index() == {}
+    assert sessions.read_current_session_cache() == {}
+
+
+def test_resolver_source_names_cache_as_adapter_not_contract(hermes_home):
+    source = sessions.resolver_source()
+    assert source["kind"] == "current_session_cache_adapter"
+    assert source["contract"] == "host session resolver adapter; cache path is not public API"
+    assert source["current_session_cache"].endswith("sessions/sessions.json")
 
 
 def test_resolve_by_exact_session_key(hermes_home):
@@ -63,11 +70,11 @@ def test_resolve_by_query_substring(hermes_home):
 
 
 def test_resolve_unknown_key_preserves_marker_target(hermes_home):
-    """A caller-supplied key not in the index is preserved for subscribe."""
+    """A caller-supplied key not in the cache is preserved for subscribe."""
     matches = sessions.resolve_target_session(session_key="agent:main:discord:dm:999")
     assert len(matches) == 1
     assert matches[0]["session_key"] == "agent:main:discord:dm:999"
-    assert matches[0].get("resolved_from_index") is False
+    assert matches[0].get("resolved_from_cache") is False
     assert matches[0]["origin"] == {}
 
 
@@ -84,9 +91,9 @@ def test_is_ambiguous(hermes_home):
     assert sessions.is_ambiguous(multi) is True
 
 
-def test_query_state_db_enforces_hard_limit(hermes_home):
+def test_query_host_sessions_enforces_hard_limit(hermes_home):
     """limit is bounded by HARD_LIMIT."""
-    out = sessions.query_state_db(limit=99999)
+    out = sessions.query_host_sessions(limit=99999)
     assert len(out) <= sessions.HARD_LIMIT
 
 

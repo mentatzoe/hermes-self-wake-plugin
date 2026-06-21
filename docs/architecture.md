@@ -19,7 +19,12 @@ Two deliverables live in this repo:
    Hermes via class-level monkeypatching. Fails closed on internal drift;
    defers to a native capability when present. This is the portable path.
 
-3. **An optional reference core patch** — under `docs/core-patch/`, an
+3. **A current-Hermes session-resolver adapter** — `self_wake/sessions.py`
+   resolves wake targets through a host-session resolver abstraction. Today that
+   abstraction reads the gateway current-session cache and `state.db` metadata;
+   that cache path is adapter detail, not the plugin's public contract.
+
+4. **An optional reference core patch** — under `docs/core-patch/`, an
    upstream-candidate artifact. **Optional**, not required. Provides the
    native capability plus active-session queueing refinement and cron/send-message wake that the shim does not. The shim's implementations are derived
    verbatim from this patch.
@@ -54,7 +59,7 @@ This contract is provided by **either** the compat shim **or** the native
 
 - **full** — wake primitive + receipts + lookup + table + notifier routing all
   present (native or shim). `source` distinguishes the provider.
-- **inspect_only** — wake primitive absent but session index/state.db readable.
+- **inspect_only** — wake primitive absent but host session resolver or state.db readable.
 - **unsupported** — no readable session surfaces.
 
 The `notifier_routing` probe is the fail-closed guard against a silent

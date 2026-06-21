@@ -179,23 +179,29 @@ def _probe_receipt_table(hermes_home: str | Path | None = None) -> dict:
     return {"probe": "receipt_table", "available": True}
 
 
-def _probe_session_index_readable(hermes_home: str | Path | None = None) -> dict:
-    """Probe whether the sessions.json index is present and readable."""
+def _probe_session_resolver_readable(hermes_home: str | Path | None = None) -> dict:
+    """Probe whether the current host session-resolver adapter is readable.
+
+    Current Hermes adapter: the gateway current-session cache at
+    ``$HERMES_HOME/sessions/sessions.json``. This cache path is not the plugin's
+    public contract; it is the current-Hermes resolver substrate.
+    """
     path = _hermes_home(hermes_home) / "sessions" / "sessions.json"
     if not path.exists():
-        return {"probe": "session_index", "available": False,
-                "reason": f"sessions.json not found at {path}"}
+        return {"probe": "session_resolver", "available": False,
+                "reason": f"gateway current-session cache not found at {path}"}
     try:
         import json
 
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return {"probe": "session_index", "available": False,
-                    "reason": "sessions.json is not a dict keyed by session_key"}
+            return {"probe": "session_resolver", "available": False,
+                    "reason": "gateway current-session cache is not a dict keyed by session_key"}
     except Exception as exc:
-        return {"probe": "session_index", "available": False,
-                "reason": f"sessions.json unreadable: {exc}"}
-    return {"probe": "session_index", "available": True}
+        return {"probe": "session_resolver", "available": False,
+                "reason": f"gateway current-session cache unreadable: {exc}"}
+    return {"probe": "session_resolver", "available": True,
+            "source": "current_session_cache_adapter"}
 
 
 def _probe_notifier_routing() -> dict:
@@ -263,7 +269,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
                         receipt table + notifier routing all present.
                         Wake-mutating tools allowed. ``source`` is "native"
                         (upstream/patched Hermes) or "shim" (compat shim).
-        inspect_only  — wake primitive absent but session index/state.db
+        inspect_only  — wake primitive absent but host session resolver/state.db
                         readable. Read-only discovery + doctor work; subscribe
                         and receipts fail closed.
         unsupported   — no readable session surfaces at all.
@@ -274,7 +280,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         _probe_session_db_receipt_methods(),
         _probe_session_store_lookup(),
         _probe_receipt_table(hermes_home),
-        _probe_session_index_readable(hermes_home),
+        _probe_session_resolver_readable(hermes_home),
         _probe_notifier_routing(),
     ]
     by_probe = {d["probe"]: bool(d.get("available")) for d in details}
@@ -286,7 +292,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         and by_probe.get("receipt_table")
         and by_probe.get("notifier_routing")
     )
-    index_readable = by_probe.get("session_index", False)
+    resolver_readable = by_probe.get("session_resolver", False)
     # state.db existence (even without the receipt table) still counts as a
     # readable surface for inspect-only mode.
     state_db_exists = _state_db_path(hermes_home).exists()
@@ -295,7 +301,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         mode = "full"
         available = True
         version = REQUIRED_VERSION
-    elif index_readable or state_db_exists or by_probe.get("receipt_table"):
+    elif resolver_readable or state_db_exists or by_probe.get("receipt_table"):
         mode = "inspect_only"
         available = False
         version = None
