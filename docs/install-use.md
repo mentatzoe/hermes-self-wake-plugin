@@ -5,25 +5,50 @@ Step-by-step install for a fresh Hermes setup.
 ## Prerequisites
 
 - Hermes Agent installed (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`)
-- The self-wake plugin repo accessible (private Git repo)
+- The self-wake plugin repo accessible (Git repo)
 - Git available on the host
 
-## 1. Apply the core patch (or use a Hermes version that includes it)
+## 1. Provide the wake capability
 
-The plugin requires the Hermes host capability `internal_session_wake_v1`.
+The plugin needs the Hermes host capability `internal_session_wake_v1`. You have
+two paths — **the compat shim (portable, no core patch)** is recommended for
+sharing across installs/upgrades; the **optional core patch** provides the full
+native behavior including active-session queueing refinement and cron/send-message wake.
 
-**Option A — apply the patch to an existing Hermes install:**
+### Option A — compat shim (portable, recommended for sharing)
+
+No core patch required. The plugin installs the capability at runtime when you
+opt in. Just enable it in config (step 4 below):
+
+```yaml
+self_wake:
+  compat_shim_enabled: true
+```
+
+The shim fails closed if Hermes internals drift, defers to a native capability
+when present, and provides behavior identical to the core patch for Kanban wake
+subscriptions. See `docs/compatibility.md` for the full shim contract.
+
+### Option B — optional core patch (native, full behavior)
+
+Apply the reference patch under `docs/core-patch/` for the native capability
+plus active-session queueing refinement and cron/send-message wake:
 
 ```bash
 cd $HERMES_HOME/hermes-agent
 git apply /path/to/plugin/docs/core-patch/0001-internal-session-wake-v1.patch
-# Run core tests
 scripts/run_tests.sh tests/
 ```
 
-**Option B — wait for upstream:**
+When the native capability is present, the shim auto-detects it and does not
+install (even if `compat_shim_enabled: true`). You can leave the shim disabled
+(default) on a patched host.
 
-If you are running vanilla upstream Hermes without the patch, the plugin will install and load in `inspect_only` mode. Wake-mutating operations will fail closed with `capability_missing` until the host capability is present.
+### Option C — neither (inspect-only)
+
+On vanilla upstream Hermes without the shim, the plugin installs and loads in
+`inspect_only` mode. Wake-mutating operations fail closed with
+`capability_missing` until you enable the shim or apply the patch.
 
 See `docs/compatibility.md` for the full version story.
 
@@ -83,12 +108,15 @@ Run diagnostics:
 
 Expected output in `full` mode:
 - `mode: full`
-- `core_capability: ok`
+- `core_capability: ok` (with `source=native` or `source=shim`)
+- `compat_shim: ok` (if using the shim) or `info` (if native/disabled)
 - `session_index: ok` (non-zero sessions)
 - `receipt_table: ok`
 - `kanban_db: ok`
 
 If any check shows `fail`, see `docs/operator-runbook.md` for troubleshooting.
+If `compat_shim` shows `fail` (drift detected), update the plugin or apply the
+optional core patch.
 
 ## 7. Resolve a target session
 

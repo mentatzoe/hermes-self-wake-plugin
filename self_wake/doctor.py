@@ -91,22 +91,80 @@ def _capability_remediation(category: str) -> str:
         )
     if category == CAP_FAIL_ATTRIBUTE_MISSING:
         return (
-            "Apply docs/core-patch/0001-internal-session-wake-v1.patch to "
-            "Hermes, or upgrade to a Hermes version that includes "
-            "internal_session_wake_v1. The host imports resolved, but the "
-            "wake_session primitive / receipt methods are not present "
-            "(core patch not applied, or return contract drifted)."
+            "Enable the bundled compat shim (self_wake.compat_shim_enabled: "
+            "true in config.yaml) to provide internal_session_wake_v1 on "
+            "vanilla Hermes without patching core, apply the optional core "
+            "patch from docs/core-patch/, or upgrade to a Hermes version that "
+            "includes it. The host imports resolved, but the wake_session "
+            "primitive / receipt methods are not present."
         )
     if category == CAP_FAIL_RECEIPT_TABLE_ABSENT:
         return (
-            "The session_wake_receipts table is absent from state.db. It is "
-            "created by the internal_session_wake_v1 core patch — apply the "
-            "patch from docs/core-patch/ or upgrade Hermes."
+            "The session_wake_receipts table is absent from state.db. Enable "
+            "the compat shim (self_wake.compat_shim_enabled: true) which "
+            "creates it, apply the optional core patch from docs/core-patch/, "
+            "or upgrade Hermes."
         )
     return (
-        "Apply docs/core-patch/0001-internal-session-wake-v1.patch to Hermes, "
+        "Enable the bundled compat shim (self_wake.compat_shim_enabled: true "
+        "in config.yaml), apply the optional core patch from docs/core-patch/, "
         "or upgrade to a Hermes version that includes internal_session_wake_v1."
     )
+
+
+def _shim_status() -> dict:
+    """Report compat shim status for the doctor.
+
+    Returns ``{status, detail, remediation?}`` where status is one of:
+    ``ok`` (shim installed and providing the capability), ``info`` (shim not
+    installed for a benign reason: disabled by config, native capability
+    present, or already-patched host), ``fail`` (shim was attempted but
+    refused on drift — the operator must act).
+    """
+    try:
+        from . import compat_shim
+        from . import config as cfg_mod
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "info", "detail": f"shim module unavailable: {exc}"}
+
+    status = compat_shim.shim_status()
+    report = status.get("report") or {}
+    reason = report.get("reason", "")
+
+    if status.get("installed"):
+        return {"status": "ok",
+                "detail": "compat shim installed; providing internal_session_wake_v1"}
+    if reason == "native_capability_present":
+        return {"status": "info",
+                "detail": "native capability present; shim not needed"}
+    if reason == "shim_disabled_by_config":
+        enabled = cfg_mod.get_bool("compat_shim_enabled", False)
+        return {
+            "status": "info",
+            "detail": "shim disabled by config (self_wake.compat_shim_enabled="
+                      f"{enabled})",
+            "remediation": (
+                "Set self_wake.compat_shim_enabled: true in config.yaml to "
+                "provide the wake capability on vanilla Hermes without patching "
+                "core, then restart the gateway."
+            ),
+        }
+    if reason == "drift_detected":
+        drift = report.get("drift", {})
+        return {
+            "status": "fail",
+            "detail": (
+                "shim refused to install: private Hermes internals drifted "
+                f"({drift.get('reason', 'unknown')}). Plugin stays "
+                "inspect-only; update the plugin or apply the core patch."
+            ),
+            "remediation": (
+                "The shim's drift check failed — Hermes internals changed. "
+                "Update the self-wake plugin to a version matching this Hermes, "
+                "or apply the optional core patch from docs/core-patch/."
+            ),
+        }
+    return {"status": "info", "detail": f"shim not installed ({reason or 'idle'})"}
 
 
 def run_diagnostics(
@@ -134,8 +192,9 @@ def run_diagnostics(
         _classify_capability_failure(cap.get("details", []))
         if not cap["available"] else (CAP_FAIL_UNKNOWN, "")
     )
+    cap_source = cap.get("source", "absent")
     cap_detail = (
-        f"mode={cap['mode']} version={cap['version']} "
+        f"mode={cap['mode']} version={cap['version']} source={cap_source} "
         f"required={cap['required_capability']}_v{cap['required_version']}"
     )
     if not cap["available"]:
@@ -152,6 +211,17 @@ def run_diagnostics(
             f"({cap_category}: {cap_summary})"
         )
         remediation.append(_capability_remediation(cap_category))
+
+    # 1b. Compat shim status (informational): reports whether the shim is
+    # installed, disabled, refused on drift, or not needed (native present).
+    shim_info = _shim_status()
+    shim_detail = shim_info["detail"]
+    checks.append(_check(
+        "compat_shim", shim_info["status"], shim_detail,
+        remediation=shim_info.get("remediation", ""),
+    ))
+    if shim_info["status"] == "fail":
+        warnings.append(shim_detail)
 
     # 2. Session index readable
     sessions_index = sessions_mod.read_sessions_index(hermes_home)

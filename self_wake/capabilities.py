@@ -198,6 +198,57 @@ def _probe_session_index_readable(hermes_home: str | Path | None = None) -> dict
     return {"probe": "session_index", "available": True}
 
 
+def _probe_notifier_routing() -> dict:
+    """Probe that the Kanban notifier routes ``session:`` markers to wake.
+
+    This is the fail-closed guard against a *half-installed* capability: a host
+    (or compat shim) that provides ``wake_session`` + receipts + lookup but does
+    NOT wire the notifier to call ``wake_session`` for ``session:`` markers would
+    create the silent "looks subscribed but won't wake" state.  ``full`` mode
+    therefore requires this probe to pass too.
+
+    Checks that ``GatewayKanbanWatchersMixin`` has both
+    ``_kanban_internal_wake_target`` and a ``_kanban_notifier_watcher`` whose
+    source references the wake routing (``_kanban_internal_wake_target`` call).
+    """
+    try:
+        from gateway.kanban_watchers import GatewayKanbanWatchersMixin  # type: ignore
+    except Exception:
+        return {"probe": "notifier_routing", "available": False,
+                "reason": "gateway.kanban_watchers.GatewayKanbanWatchersMixin not importable"}
+    if not _has_callable(GatewayKanbanWatchersMixin, "_kanban_internal_wake_target"):
+        return {"probe": "notifier_routing", "available": False,
+                "reason": "_kanban_internal_wake_target not present on mixin"}
+    fn = getattr(GatewayKanbanWatchersMixin, "_kanban_notifier_watcher", None)
+    if not callable(fn):
+        return {"probe": "notifier_routing", "available": False,
+                "reason": "_kanban_notifier_watcher not present on mixin"}
+    try:
+        source = inspect.getsource(fn)
+    except (OSError, TypeError):
+        # Source unavailable: cannot confirm routing is wired.  Decline to
+        # report full rather than risk a silent half-wake.
+        return {"probe": "notifier_routing", "available": False,
+                "reason": "_kanban_notifier_watcher source not introspectable"}
+    if "_kanban_internal_wake_target" not in source or "wake_session" not in source:
+        return {"probe": "notifier_routing", "available": False,
+                "reason": "_kanban_notifier_watcher does not route session: markers through wake_session"}
+    return {"probe": "notifier_routing", "available": True}
+
+
+def _capability_source(available: bool) -> str:
+    """Report whether the capability is native, shim-provided, or absent."""
+    if not available:
+        return "absent"
+    try:
+        from . import compat_shim
+        if compat_shim.is_installed():
+            return "shim"
+    except Exception:
+        pass
+    return "native"
+
+
 def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
     """Probe for the ``internal_session_wake_v1`` host capability.
 
@@ -209,7 +260,9 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
 
     Modes:
         full          — wake primitive + receipt methods + session lookup +
-                        receipt table all present. Wake-mutating tools allowed.
+                        receipt table + notifier routing all present.
+                        Wake-mutating tools allowed. ``source`` is "native"
+                        (upstream/patched Hermes) or "shim" (compat shim).
         inspect_only  — wake primitive absent but session index/state.db
                         readable. Read-only discovery + doctor work; subscribe
                         and receipts fail closed.
@@ -222,6 +275,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         _probe_session_store_lookup(),
         _probe_receipt_table(hermes_home),
         _probe_session_index_readable(hermes_home),
+        _probe_notifier_routing(),
     ]
     by_probe = {d["probe"]: bool(d.get("available")) for d in details}
     wake_present = (
@@ -230,6 +284,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         and by_probe.get("session_db.receipt_methods")
         and by_probe.get("session_store.lookup")
         and by_probe.get("receipt_table")
+        and by_probe.get("notifier_routing")
     )
     index_readable = by_probe.get("session_index", False)
     # state.db existence (even without the receipt table) still counts as a
@@ -253,6 +308,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         "available": available,
         "version": version,
         "mode": mode,
+        "source": _capability_source(available),
         "required_capability": REQUIRED_CAPABILITY,
         "required_version": REQUIRED_VERSION,
         "details": details,
@@ -278,13 +334,17 @@ def require_wake_capability(hermes_home: str | Path | None = None) -> Optional[d
         "success": False,
         "error": "capability_missing",
         "mode": cap["mode"],
+        "source": cap.get("source", "absent"),
         "required_capability": REQUIRED_CAPABILITY,
         "required_version": REQUIRED_VERSION,
         "remediation": (
             "This operation requires the Hermes host capability "
-            f"{REQUIRED_CAPABILITY}_v{REQUIRED_VERSION}. Apply the core patch "
-            "from docs/core-patch/ or upgrade to a Hermes version that includes "
-            "it. On vanilla Hermes the plugin runs in inspect-only mode and "
-            "must not create wake subscriptions that would never fire."
+            f"{REQUIRED_CAPABILITY}_v{REQUIRED_VERSION}. Enable the bundled "
+            "compat shim (self_wake.compat_shim_enabled: true in config.yaml) "
+            "to provide it on vanilla Hermes without patching core, apply the "
+            "optional core patch from docs/core-patch/, or upgrade to a Hermes "
+            "version that includes it natively. On vanilla Hermes without the "
+            "shim the plugin runs in inspect-only mode and must not create wake "
+            "subscriptions that would never fire."
         ),
     }

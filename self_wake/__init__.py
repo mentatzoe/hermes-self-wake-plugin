@@ -1,15 +1,23 @@
 """Hermes self-wake plugin: formal operator tools for session wake routing.
 
-Implements Option 2 of the architecture design: a standalone plugin that owns
-operator policy and diagnostics (session discovery, Kanban wake subscription
-management, receipt inspection, doctor) while depending on a host-owned
-``internal_session_wake_v1`` core capability (applied via the separate clean
-patch under ``docs/core-patch/``).
+A standalone plugin that owns operator policy and diagnostics (session
+discovery, Kanban wake subscription management, receipt inspection, doctor) and
+depends on a host-owned ``internal_session_wake_v1`` capability.
 
-The plugin never edits Hermes core files and never monkeypatches by default.
-On hosts without the wake capability it loads in ``inspect_only`` mode and
-fails closed (clear ``capability_missing`` errors) for any wake-mutating
-operation, so it never creates "looks subscribed but will never wake" state.
+The capability can be provided three ways, in preference order:
+
+1. **Native** — upstream Hermes ships ``internal_session_wake_v1``, or the
+   operator applies the optional reference core patch under
+   ``docs/core-patch/``.  No monkeypatching.
+2. **Compat shim** — the bundled ``self_wake.compat_shim`` installs the
+   capability at runtime on vanilla Hermes when the operator opts in
+   (``self_wake.compat_shim_enabled: true``).  This is the portable/shareable
+   path: the plugin carries its own compatibility layer and never requires
+   patching Hermes core.  The shim fails closed on internal drift and defers
+   to a native capability when present.
+3. **Absent** — the plugin loads in ``inspect_only`` mode and fails closed
+   (clear ``capability_missing`` errors) for any wake-mutating operation, so it
+   never creates "looks subscribed but will never wake" state.
 
 See ``docs/architecture.md`` for the full design and ``docs/compatibility.md``
 for the compatibility/version story.
@@ -19,9 +27,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import cli, schemas, tools
+from . import cli, compat_shim, schemas, tools
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +40,9 @@ def register(ctx) -> None:
     Called once at Hermes startup. Registration itself is unconditional (the
     plugin loads on any host); capability gating happens at tool-call time so
     unsupported hosts get clear ``capability_missing`` errors instead of a
-    silent no-op.
+    silent no-op.  After registration, the compat shim is installed if the
+    operator has enabled it (``self_wake.compat_shim_enabled: true``) and no
+    native capability is present.
     """
     ctx.register_tool(
         name="self_wake_sessions",
@@ -83,5 +93,22 @@ def register(ctx) -> None:
             skill_md,
             description="Use Kanban terminal events to internally wake existing Hermes sessions.",
         )
+
+    # Install the compat shim if the operator has opted in and no native
+    # capability is present.  Best-effort: a refusal (disabled / drift /
+    # native-present) is logged, not raised — the plugin still loads and the
+    # capability probe reports the resulting mode honestly.
+    try:
+        report = compat_shim.install_shim()
+        reason = report.get("reason", "")
+        if report.get("installed"):
+            logger.info("self-wake compat shim installed: %s", reason)
+        elif reason in {"native_capability_present", "shim_disabled_by_config",
+                        "already_installed"}:
+            logger.debug("self-wake compat shim not installed: %s", reason)
+        else:
+            logger.warning("self-wake compat shim not installed: %s", reason)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("self-wake compat shim install raised: %s", exc)
 
     logger.info("self-wake plugin loaded")

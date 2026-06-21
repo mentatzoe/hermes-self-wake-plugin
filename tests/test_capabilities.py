@@ -6,12 +6,14 @@ from self_wake import capabilities as caps
 
 def test_probe_returns_structured_result(hermes_home):
     result = caps.probe_wake_capability()
-    for key in ("available", "version", "mode", "details", "required_capability", "required_version"):
+    for key in ("available", "version", "mode", "source", "details",
+                "required_capability", "required_version"):
         assert key in result
     assert result["mode"] in ("full", "inspect_only", "unsupported")
+    assert result["source"] in ("native", "shim", "absent")
     assert result["required_capability"] == "internal_session_wake"
     assert result["required_version"] == 1
-    assert isinstance(result["details"], list) and len(result["details"]) == 6
+    assert isinstance(result["details"], list) and len(result["details"]) == 7
 
 
 def test_unsupported_mode_when_nothing_readable(monkeypatch, tmp_path):
@@ -143,7 +145,35 @@ def test_return_shape_drift_downgrades_from_full(monkeypatch, tmp_path):
                         lambda hh=None: {"probe": "receipt_table", "available": True})
     monkeypatch.setattr(caps, "_probe_session_index_readable",
                         lambda hh=None: {"probe": "session_index", "available": True})
+    monkeypatch.setattr(caps, "_probe_notifier_routing",
+                        lambda: {"probe": "notifier_routing", "available": True})
     cap = caps.probe_wake_capability()
     assert cap["mode"] != "full"
     assert cap["available"] is False
     assert cap["version"] is None
+
+
+def test_notifier_routing_drift_downgrades_from_full(monkeypatch, tmp_path):
+    """A half-installed capability (wake_session + receipts + lookup present
+    but notifier NOT wired to route session: markers) must NOT report full
+    mode — this is the fail-closed guard against the silent half-wake state."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    from self_wake import capabilities as caps
+    monkeypatch.setattr(caps, "_probe_gateway_wake_session",
+                        lambda: {"probe": "gateway.wake_session", "available": True})
+    monkeypatch.setattr(caps, "_probe_wake_session_return_shape",
+                        lambda: {"probe": "wake_session.return_shape", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
+                        lambda: {"probe": "session_db.receipt_methods", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_store_lookup",
+                        lambda: {"probe": "session_store.lookup", "available": True})
+    monkeypatch.setattr(caps, "_probe_receipt_table",
+                        lambda hh=None: {"probe": "receipt_table", "available": True})
+    monkeypatch.setattr(caps, "_probe_session_index_readable",
+                        lambda hh=None: {"probe": "session_index", "available": True})
+    monkeypatch.setattr(caps, "_probe_notifier_routing",
+                        lambda: {"probe": "notifier_routing", "available": False,
+                                 "reason": "_kanban_notifier_watcher does not route session: markers through wake_session"})
+    cap = caps.probe_wake_capability()
+    assert cap["mode"] != "full"
+    assert cap["available"] is False

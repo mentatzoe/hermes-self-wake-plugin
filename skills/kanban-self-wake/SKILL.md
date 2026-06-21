@@ -17,7 +17,9 @@ For Kanban wake to work, the `kanban_notify_subs.user_id` must be set to `sessio
 
 ## Prerequisites
 
-- Hermes with `internal_session_wake_v1` (apply core patch or use upstreamed version)
+- Hermes with `internal_session_wake_v1`, provided **either** by:
+  - the bundled **compat shim** (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch), **or**
+  - the **optional core patch** under `docs/core-patch/` / upstream Hermes (native)
 - `self-wake` plugin installed and enabled
 - `self_wake` toolset added to platform_toolsets in config.yaml
 - Hermes/gateway restarted after enablement
@@ -80,7 +82,7 @@ The plugin resolves to a session_key when possible; otherwise writes a `session_
 
 ### `capability_missing`
 
-The host lacks `internal_session_wake_v1`. Apply the core patch from `docs/core-patch/` or upgrade Hermes. The plugin never writes wake markers on an unsupported host.
+The host lacks `internal_session_wake_v1`. Enable the compat shim (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch), apply the optional core patch from `docs/core-patch/`, or upgrade Hermes. The plugin never writes wake markers on an unsupported host.
 
 ### `ambiguous_session`
 
@@ -96,11 +98,12 @@ The target session has no stored origin and no `chat_id` was passed explicitly. 
 
 ## Compatibility
 
-The plugin requires Hermes host capability `internal_session_wake_v1`. Without it, subscribe and receipt operations return `capability_missing`. Session discovery and diagnostics work in `inspect_only` mode.
+The plugin requires Hermes host capability `internal_session_wake_v1`, provided by the bundled compat shim (`self_wake.compat_shim_enabled: true` — portable, no core patch) or the optional core patch / upstream Hermes (native). Without it, subscribe and receipt operations return `capability_missing`. Session discovery and diagnostics work in `inspect_only` mode. `/self-wake doctor` reports the active `source` (native/shim/absent).
 
 ## See Also
 
 - Plugin repo `docs/operator-runbook.md` — full operational procedures
-- Plugin repo `docs/compatibility.md` — version matrix and upgrade path
-- Plugin repo `docs/install-use.md` — fresh install steps
-- Plugin repo `docs/core-patch/` — upstream-candidate core patch artifact
+- Plugin repo `docs/compatibility.md` — capability sources, shim internals, drift handling, upgrade path
+- Plugin repo `docs/install-use.md` — fresh install steps (shim + optional core-patch)
+- Plugin repo `docs/core-patch/` — **optional** reference / upstream-candidate core patch artifact
+- Plugin repo `self_wake/compat_shim.py` — the compat shim implementation

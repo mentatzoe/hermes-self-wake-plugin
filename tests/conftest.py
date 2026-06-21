@@ -239,6 +239,8 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
                             lambda hh=None: {"probe": "receipt_table", "available": True})
         monkeypatch.setattr(caps, "_probe_session_index_readable",
                             lambda hh=None: {"probe": "session_index", "available": True})
+        monkeypatch.setattr(caps, "_probe_notifier_routing",
+                            lambda: {"probe": "notifier_routing", "available": True})
     elif mode == "inspect_only":
         # Wake primitive absent, but session index + state.db readable.
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
@@ -257,6 +259,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         # false otherwise.
         monkeypatch.setattr(caps, "_probe_session_index_readable",
                             lambda hh=None: {"probe": "session_index", "available": True})
+        monkeypatch.setattr(caps, "_probe_notifier_routing",
+                            lambda: {"probe": "notifier_routing", "available": False,
+                                     "reason": "_kanban_internal_wake_target not present on mixin"})
     elif mode == "unsupported":
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": False,
@@ -276,6 +281,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         monkeypatch.setattr(caps, "_probe_session_index_readable",
                             lambda hh=None: {"probe": "session_index", "available": False,
                                              "reason": "sessions.json not found"})
+        monkeypatch.setattr(caps, "_probe_notifier_routing",
+                            lambda: {"probe": "notifier_routing", "available": False,
+                                     "reason": "gateway.kanban_watchers.GatewayKanbanWatchersMixin not importable"})
     return mode
 
 

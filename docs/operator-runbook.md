@@ -9,7 +9,8 @@ Run end-to-end diagnostics:
 ```
 
 The doctor checks:
-- `core_capability` — `internal_session_wake_v1` present and version
+- `core_capability` — `internal_session_wake_v1` present and version, with `source` (native/shim/absent)
+- `compat_shim` — compat shim status (installed / disabled / native-present / drift-fail)
 - `session_index` — `sessions.json` readable and non-empty
 - `receipt_table` — `session_wake_receipts` present and counts
 - `kanban_db` — Kanban DB reachable and existing subscriptions
@@ -106,7 +107,7 @@ The plugin resolves the session_id to a session_key when possible; if not resolv
 **Fail-closed (inspect_only mode):**
 - `success: false`
 - `error: "capability_missing"`
-- `remediation: "Apply the core patch from docs/core-patch/ or upgrade Hermes"`
+- `remediation: "Enable the bundled compat shim (self_wake.compat_shim_enabled: true) ... or apply the optional core patch from docs/core-patch/"`
 
 **Ambiguous session:**
 - `success: false`
@@ -156,13 +157,38 @@ Receipt payload previews are truncated to 200 characters by default. Full payloa
 
 **Symptom:** `/self-wake subscribe` returns `error: capability_missing`.
 
-**Cause:** The host lacks `internal_session_wake_v1`.
+**Cause:** The host lacks `internal_session_wake_v1` (no native capability and the shim is not enabled).
+
+**Fix (portable — no core patch):**
+1. Enable the compat shim in `~/.hermes/config.yaml`:
+   ```yaml
+   self_wake:
+     compat_shim_enabled: true
+   ```
+2. Restart Hermes / gateway
+3. Re-run `/self-wake doctor` — expect `mode: full`, `source: shim`, `compat_shim: ok`
+
+**Fix (optional core patch — native, full behavior):**
+1. Apply the patch: `cd $HERMES_HOME/hermes-agent && git apply docs/core-patch/0001-internal-session-wake-v1.patch`
+2. Restart Hermes / gateway
+3. Re-run `/self-wake doctor` — expect `mode: full`, `source: native`
+
+If `/self-wake doctor` shows `compat_shim: fail`, the shim's drift check refused
+to install (Hermes internals changed). Update the plugin or apply the optional
+core patch.
+
+### `compat_shim: fail` in doctor
+
+**Symptom:** `compat_shim` check shows `fail` with "private Hermes internals drifted".
+
+**Cause:** The shim's drift detection found that a private Hermes internal the
+shim wraps (SessionStore, SessionDB, GatewayRunner, or the Kanban notifier) has
+changed shape on this Hermes version.
 
 **Fix:**
-1. Apply the core patch: `cd $HERMES_HOME/hermes-agent && git apply docs/core-patch/0001-internal-session-wake-v1.patch`
-2. Or upgrade to a Hermes version that includes the capability
+1. Update the self-wake plugin to a version matching this Hermes, **or**
+2. Apply the optional core patch from `docs/core-patch/` (native capability, no shim needed)
 3. Restart Hermes / gateway
-4. Re-run `/self-wake doctor` to verify `full` mode
 
 ### Receipts empty but subscribe succeeded
 
