@@ -1,3 +1,2169 @@
-# Placeholder: actual patch to be extracted from local dirty stack
-# This file will be replaced with the clean upstream patch series.
-# See README.md for the patch series description.
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 359069966..6ee6e80bf 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -12,6 +12,7 @@ import asyncio
+ import atexit
+ import concurrent.futures
+ import contextvars
++import hashlib
+ import json
+ import logging
+ import os
+@@ -30,7 +31,7 @@ except ImportError:
+     except ImportError:
+         msvcrt = None
+ from pathlib import Path
+-from typing import List, Optional
++from typing import Any, Coroutine, List, Optional, cast
+ 
+ # Add parent directory to path for imports BEFORE repo-level imports.
+ # Without this, standalone invocations (e.g. after `hermes update` reloads
+@@ -656,7 +657,168 @@ def _send_media_via_adapter(
+             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
+ 
+ 
+-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
++def _cron_wake_on_delivery_enabled(cfg: dict | None) -> bool:
++    """Whether a successful cron delivery should wake the target session."""
++    cron_cfg = (cfg or {}).get("cron", {}) if isinstance(cfg, dict) else {}
++    return bool(cron_cfg.get("wake_agent_on_delivery", False))
++
++
++def _platform_value(value: Any) -> str:
++    if hasattr(value, "value"):
++        return str(value.value).lower()
++    return str(value or "").lower()
++
++
++def _blankish(value: Any) -> str:
++    return str(value or "")
++
++
++def _entry_matches_delivery_target(entry: Any, target: dict) -> bool:
++    origin = getattr(entry, "origin", None)
++    if origin is None:
++        return False
++    if _platform_value(getattr(origin, "platform", "")) != str(target.get("platform") or "").lower():
++        return False
++    if _blankish(getattr(origin, "chat_id", "")) != _blankish(target.get("chat_id")):
++        return False
++    return _blankish(getattr(origin, "thread_id", "")) == _blankish(target.get("thread_id"))
++
++
++def _origin_dict_matches_delivery_target(origin: dict, target: dict) -> bool:
++    if str(origin.get("platform") or "").lower() != str(target.get("platform") or "").lower():
++        return False
++    if _blankish(origin.get("chat_id")) != _blankish(target.get("chat_id")):
++        return False
++    return _blankish(origin.get("thread_id")) == _blankish(target.get("thread_id"))
++
++
++def _resolve_cron_wake_target(job: dict, target: dict, runner: Any) -> dict | None:
++    """Resolve cron delivery to an existing gateway session key/id.
++
++    Newer cron jobs may persist the originating session_key/session_id in
++    origin. Older jobs only have platform/chat/thread origin metadata, so while
++    running inside the gateway we search the live SessionStore for an entry with
++    the same stored origin. We never synthesize a cron-scheduler identity here:
++    if no existing session resolves, cron delivery remains visible-only.
++    """
++    origin_value = job.get("origin")
++    origin = origin_value if isinstance(origin_value, dict) else {}
++    # A stored origin session key/id is only the delivery target for origin-like
++    # delivery.  If the job is explicitly delivering elsewhere, resolve by the
++    # delivered platform/chat/thread below instead of waking the creator lane.
++    if _origin_dict_matches_delivery_target(origin, target):
++        for key in ("session_key", "gateway_session_key"):
++            value = str(origin.get(key) or "").strip()
++            if value:
++                return {"session_key": value}
++        for key in ("session_id", "gateway_session_id"):
++            value = str(origin.get(key) or "").strip()
++            if value:
++                return {"session_id": value}
++
++    store = getattr(runner, "session_store", None)
++    if store is None:
++        return None
++    entries = []
++    try:
++        entries = list(store.list_sessions())
++    except TypeError:
++        try:
++            entries = list(store.list_sessions(active_minutes=None))
++        except Exception:
++            entries = []
++    except Exception:
++        entries = []
++    for entry in entries:
++        if _entry_matches_delivery_target(entry, target):
++            session_key = str(getattr(entry, "session_key", "") or "").strip()
++            if session_key:
++                return {"session_key": session_key}
++            session_id = str(getattr(entry, "session_id", "") or "").strip()
++            if session_id:
++                return {"session_id": session_id}
++    return None
++
++
++def _schedule_cron_delivery_wake(
++    *,
++    job: dict,
++    target: dict,
++    delivered_content: str,
++    runner: Any,
++    loop: Any,
++) -> dict:
++    """Best-effort internal wake after successful cron delivery.
++
++    Returns a status dict for logging/tests. Failures are deliberately non-fatal
++    to visible delivery: a delivery notification reaching Discord/Telegram must
++    not be rolled back because the optional wake path could not resolve a live
++    gateway session.
++    """
++    if runner is None:
++        return {"status": "skipped", "reason": "runner unavailable"}
++    wake_fn = getattr(runner, "wake_session", None)
++    if not callable(wake_fn):
++        return {"status": "skipped", "reason": "wake_session unavailable"}
++    if loop is None or not getattr(loop, "is_running", lambda: False)():
++        return {"status": "skipped", "reason": "gateway loop unavailable"}
++
++    wake_target = _resolve_cron_wake_target(job, target, runner)
++    if not wake_target:
++        return {"status": "skipped", "reason": "target session unavailable"}
++
++    platform_name = str(target.get("platform") or "").lower()
++    chat_id = str(target.get("chat_id") or "")
++    thread_id = str(target.get("thread_id") or "")
++    job_id = str(job.get("id") or "")
++    job_name = str(job.get("name") or job_id or "cron job")
++    dedupe_material = "\0".join([job_id, platform_name, chat_id, thread_id, delivered_content])
++    dedupe_hash = hashlib.sha256(dedupe_material.encode("utf-8", errors="replace")).hexdigest()
++    payload = (
++        f"Internal wake from cron delivery: cron job '{job_name}' "
++        f"(id: {job_id}) delivered output into this existing "
++        f"{platform_name} session. Consume the delivered cron result and "
++        "continue if follow-through is needed.\n\n"
++        f"Delivered content:\n{delivered_content}"
++    )
++    dedupe_key = f"cron_delivery:{job_id}:{platform_name}:{chat_id}:{thread_id}:{dedupe_hash}"
++
++    wake_coro = cast(Coroutine[Any, Any, Any], wake_fn(
++        **wake_target,
++        payload=payload,
++        source_kind="cron_delivery",
++        dedupe_key=dedupe_key,
++    ))
++    scheduled = False
++    try:
++        from agent.async_utils import safe_schedule_threadsafe
++        future = safe_schedule_threadsafe(
++            wake_coro,
++            loop,
++            logger=logger,
++            log_message="Cron delivery wake scheduling error",
++        )
++        if future is None:
++            try:
++                wake_coro.close()
++            except Exception:
++                pass
++            return {"status": "skipped", "reason": "gateway loop unavailable"}
++        scheduled = True
++        result = future.result(timeout=60)
++        if isinstance(result, dict):
++            return result
++        return {"status": "unknown", "result": result}
++    except Exception as exc:
++        if not scheduled:
++            try:
++                wake_coro.close()
++            except Exception:
++                pass
++        return {"status": "failure", "error": f"{type(exc).__name__}: {exc}"}
++
++
++def _deliver_result(job: dict, content: str, adapters=None, loop=None, runner=None) -> Optional[str]:
+     """
+     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
+ 
+@@ -682,9 +844,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
+     # in config.yaml for clean output.
+     wrap_response = True
++    wake_on_delivery = False
+     try:
+         user_cfg = load_config()
+         wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
++        wake_on_delivery = _cron_wake_on_delivery_enabled(user_cfg)
+     except Exception:
+         pass
+ 
+@@ -845,6 +1009,32 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+                 continue
+ 
+             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
++            delivered = True
++
++        if delivered and wake_on_delivery:
++            wake_result = _schedule_cron_delivery_wake(
++                job=job,
++                target=target,
++                delivered_content=delivery_content,
++                runner=runner,
++                loop=loop,
++            )
++            wake_status = str(wake_result.get("status") or "")
++            if wake_status in {"skipped", "unavailable"}:
++                logger.info(
++                    "Job '%s': cron delivery wake skipped for %s:%s (%s)",
++                    job["id"], platform_name, chat_id, wake_result.get("reason") or wake_status,
++                )
++            elif wake_status == "failure":
++                logger.warning(
++                    "Job '%s': cron delivery wake failed for %s:%s (%s)",
++                    job["id"], platform_name, chat_id, wake_result.get("error") or "unknown error",
++                )
++            else:
++                logger.info(
++                    "Job '%s': cron delivery wake status=%s receipt=%s for %s:%s",
++                    job["id"], wake_status, wake_result.get("receipt_id"), platform_name, chat_id,
++                )
+ 
+     if delivery_errors:
+         return "; ".join(delivery_errors)
+@@ -1967,7 +2157,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
+             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+ 
+ 
+-def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
++def tick(verbose: bool = True, adapters=None, loop=None, runner=None, sync: bool = True) -> int:
+     """
+     Check and run all due jobs.
+     
+@@ -2068,7 +2258,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
+                 delivery_error = None
+                 if should_deliver:
+                     try:
+-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
++                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop, runner=runner)
+                     except Exception as de:
+                         delivery_error = str(de)
+                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+diff --git a/gateway/kanban_watchers.py b/gateway/kanban_watchers.py
+index 328cbd7fb..83c31d53d 100644
+--- a/gateway/kanban_watchers.py
++++ b/gateway/kanban_watchers.py
+@@ -26,6 +26,24 @@ logger = logging.getLogger("gateway.run")
+ class GatewayKanbanWatchersMixin:
+     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
+ 
++    def _kanban_internal_wake_target(self, sub: dict) -> tuple[str, str] | None:
++        """Return (target_kind, target_value) for internal-wake subscriptions.
++
++        ``kanban_notify_subs.user_id`` historically carries platform-user
++        metadata and is otherwise unused by the notifier.  A value of
++        ``session:<session_key>`` or ``session_id:<session_id>`` opts a
++        subscription into the gateway-local wake primitive instead of platform
++        send loopback, while preserving the existing subscription schema.
++        """
++        marker = str(sub.get("user_id") or "").strip()
++        if marker.startswith("session_id:"):
++            target = marker.split(":", 1)[1].strip()
++            return ("session_id", target) if target else None
++        if marker.startswith("session:"):
++            target = marker.split(":", 1)[1].strip()
++            return ("session_key", target) if target else None
++        return None
++
+     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
+         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
+ 
+@@ -299,14 +317,40 @@ class GatewayKanbanWatchersMixin:
+                             sub["task_id"], sub["platform"],
+                             sub["chat_id"], sub.get("thread_id") or "",
+                         )
++                        internal_wake_delivery = False
+                         try:
+-                            await adapter.send(
+-                                sub["chat_id"], msg, metadata=metadata,
+-                            )
+-                            logger.debug(
+-                                "kanban notifier: delivered %s event for %s to %s/%s on board %s",
+-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+-                            )
++                            wake_target = self._kanban_internal_wake_target(sub)
++                            if wake_target is not None:
++                                internal_wake_delivery = True
++                                target_kind, target_value = wake_target
++                                dedupe_key = f"kanban:{board_slug or ''}:{sub['task_id']}:{ev.id}"
++                                wake_kwargs = {
++                                    "payload": msg,
++                                    "source_kind": "kanban",
++                                    "dedupe_key": dedupe_key,
++                                }
++                                if target_kind == "session_id":
++                                    wake_kwargs["session_id"] = target_value
++                                else:
++                                    wake_kwargs["session_key"] = target_value
++                                result = await self.wake_session(**wake_kwargs)
++                                if result.get("status") == "failure":
++                                    raise RuntimeError(result.get("error") or "internal wake failed")
++                                logger.debug(
++                                    "kanban notifier: internally woke %s for %s event on %s (receipt=%s)",
++                                    target_value,
++                                    kind,
++                                    sub["task_id"],
++                                    result.get("receipt_id"),
++                                )
++                            else:
++                                await adapter.send(
++                                    sub["chat_id"], msg, metadata=metadata,
++                                )
++                                logger.debug(
++                                    "kanban notifier: delivered %s event for %s to %s/%s on board %s",
++                                    kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
++                                )
+                             # After delivering the text notification, surface
+                             # any artifact paths the worker referenced in
+                             # ``kanban_complete(summary=..., artifacts=[...])``
+@@ -316,7 +360,7 @@ class GatewayKanbanWatchersMixin:
+                             # ``send_document`` / ``send_image_file`` uploads
+                             # them. Only fires on the ``completed`` event so
+                             # we never spam attachments on retries.
+-                            if kind == "completed":
++                            if kind == "completed" and not internal_wake_delivery:
+                                 try:
+                                     await self._deliver_kanban_artifacts(
+                                         adapter=adapter,
+diff --git a/gateway/mirror.py b/gateway/mirror.py
+index 71a3d313d..94255d037 100644
+--- a/gateway/mirror.py
++++ b/gateway/mirror.py
+@@ -149,6 +149,21 @@ def _find_session_id(
+     return best_entry.get("session_id")
+ 
+ 
++def find_session_id(
++    platform: str,
++    chat_id: str,
++    thread_id: Optional[str] = None,
++    user_id: Optional[str] = None,
++) -> Optional[str]:
++    """Public lookup helper for callers that need the mirrored target.
++
++    ``mirror_to_session`` intentionally returns a bool for backward
++    compatibility. Internal wake callers need the same exact target-session
++    resolution without duplicating the sessions-index matching rules, so expose
++    a narrow wrapper around the existing private lookup.
++    """
++    return _find_session_id(platform, chat_id, thread_id=thread_id, user_id=user_id)
++
+ 
+ def _append_to_sqlite(session_id: str, message: dict) -> None:
+     """Append a message to the SQLite session database."""
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index cda3acc6e..1a5ddcf39 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -3957,6 +3957,32 @@ class BasePlatformAdapter(ABC):
+ 
+         # Check if there's already an active handler for this session
+         if session_key in self._active_sessions:
++            # Gateway-local internal wakes are trusted control-plane events
++            # targeting this existing session.  When the target is already
++            # active, they must be queued for the next turn without going
++            # through command, clarify, or busy-session bypasses: the default
++            # live busy mode is ``interrupt``, and clarify/command bypasses
++            # are intended for human-authored foreground replies, not internal
++            # wake payloads.  The wake receipt id marker keeps this narrow to
++            # the production wake_session primitive rather than every internal
++            # event.
++            if getattr(event, "internal", False) and hasattr(
++                event,
++                "_hermes_internal_wake_receipt_id",
++            ):
++                logger.debug(
++                    "[%s] Queuing internal wake for active session %s without foreground bypass",
++                    self.name,
++                    session_key,
++                )
++                merge_pending_message_event(
++                    self._pending_messages,
++                    session_key,
++                    event,
++                    merge_text=event.message_type == MessageType.TEXT,
++                )
++                return
++
+             # Certain commands must bypass the active-session guard and be
+             # dispatched directly to the gateway runner.  Without this, they
+             # are queued as pending messages and either:
+diff --git a/gateway/run.py b/gateway/run.py
+index c0c5e9dfa..28c60ac3f 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -26,6 +26,7 @@ except ModuleNotFoundError:
+ 
+ import asyncio
+ import dataclasses
++import hashlib
+ import inspect
+ import json
+ import logging
+@@ -4793,6 +4794,266 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+         if drained:
+             logger.info("Drained %d inbound message(s) queued during startup restore", drained)
+ 
++    def _lookup_session_entry_for_wake(
++        self,
++        *,
++        session_key: Optional[str] = None,
++        session_id: Optional[str] = None,
++    ):
++        """Resolve an existing SessionEntry for an internal wake request."""
++        if bool(session_key) == bool(session_id):
++            raise ValueError("provide exactly one of session_key or session_id")
++        if session_id:
++            return self.session_store.lookup_by_session_id(session_id)
++        if session_key is None:
++            raise ValueError("session_key is required when session_id is not provided")
++        return self.session_store.lookup_by_session_key(session_key)
++
++    def _wake_message_ids_after(
++        self,
++        session_id: str,
++        *,
++        previous_max_id: int,
++        payload: str,
++    ) -> tuple[Optional[int], Optional[int]]:
++        """Best-effort lookup of the injected user row and assistant row."""
++        session_db = getattr(self, "_session_db", None)
++        if session_db is None:
++            return None, None
++        try:
++            messages = session_db.get_messages(session_id)
++        except Exception:
++            logger.debug("failed to inspect wake messages for %s", session_id, exc_info=True)
++            return None, None
++        new_messages = [m for m in messages if int(m.get("id") or 0) > previous_max_id]
++        injected_id: Optional[int] = None
++        assistant_id: Optional[int] = None
++        for msg in new_messages:
++            if injected_id is None and msg.get("role") == "user" and msg.get("content") == payload:
++                injected_id = int(msg["id"])
++                continue
++            if injected_id is not None and msg.get("role") == "assistant":
++                assistant_id = int(msg["id"])
++                break
++        if injected_id is None:
++            for msg in new_messages:
++                if msg.get("role") == "user":
++                    injected_id = int(msg["id"])
++                    break
++        if assistant_id is None:
++            for msg in new_messages:
++                if msg.get("role") == "assistant":
++                    assistant_id = int(msg["id"])
++                    break
++        return injected_id, assistant_id
++
++    async def wake_session(
++        self,
++        *,
++        payload: str,
++        source_kind: str,
++        session_key: Optional[str] = None,
++        session_id: Optional[str] = None,
++        dedupe_key: Optional[str] = None,
++    ) -> Dict[str, Any]:
++        """Inject a trusted internal event into an existing gateway session.
++
++        This is a gateway-local primitive for cron/Kanban/control-plane callers:
++        it resolves an existing SessionEntry, reuses that entry's stored origin,
++        dispatches ``MessageEvent(..., internal=True)`` through the live adapter
++        pipeline, and records a bounded receipt in state.db.
++        """
++        session_db = getattr(self, "_session_db", None)
++        if session_db is None:
++            return {
++                "status": "failure",
++                "error": "session database unavailable for wake receipt",
++            }
++
++        try:
++            entry = self._lookup_session_entry_for_wake(
++                session_key=session_key,
++                session_id=session_id,
++            )
++        except Exception as exc:
++            return {"status": "failure", "error": str(exc)}
++        if entry is None:
++            return {"status": "failure", "error": "target session not found"}
++        if entry.origin is None:
++            return {"status": "failure", "error": "target session has no stored origin"}
++
++        payload = str(payload or "")
++        payload_bytes = len(payload.encode("utf-8", errors="replace"))
++        payload_hash = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
++        payload_preview = payload[:500]
++        try:
++            origin_snapshot = entry.origin.to_dict()
++        except Exception:
++            origin_snapshot = None
++
++        receipt, created = session_db.create_session_wake_receipt(
++            source_kind=source_kind,
++            target_session_key=entry.session_key,
++            target_session_id=entry.session_id,
++            origin_snapshot=origin_snapshot,
++            payload_hash=payload_hash,
++            payload_preview=payload_preview,
++            payload_bytes=payload_bytes,
++            dedupe_key=dedupe_key,
++        )
++        if not created:
++            existing_status = str(receipt.get("status") or "")
++            if existing_status not in {"failure", "requested"}:
++                return {
++                    "status": "deduped",
++                    "receipt_id": receipt.get("id"),
++                    "target_session_key": entry.session_key,
++                    "target_session_id": entry.session_id,
++                }
++            # A prior attempt reserved the dedupe key but did not complete.
++            # Reuse that receipt so transient adapter/handler failures retry
++            # the wake instead of silently advancing the caller's cursor.
++            receipt = session_db.update_session_wake_receipt(
++                int(receipt["id"]),
++                status="requested",
++                error="",
++            ) or receipt
++
++        receipt_id = int(receipt["id"])
++        adapter = self.adapters.get(entry.origin.platform)
++        if adapter is None:
++            error = f"adapter unavailable for {entry.origin.platform.value}"
++            row = session_db.update_session_wake_receipt(
++                receipt_id,
++                status="failure",
++                error=error,
++            )
++            return {
++                "status": "failure",
++                "error": error,
++                "receipt_id": receipt_id,
++                "receipt": row,
++            }
++
++        before_max_id = 0
++        try:
++            existing_messages = session_db.get_messages(entry.session_id)
++            before_max_id = max((int(m.get("id") or 0) for m in existing_messages), default=0)
++        except Exception:
++            logger.debug("failed to snapshot pre-wake message id", exc_info=True)
++
++        adapter_key = None
++        try:
++            adapter_config = getattr(adapter, "config", None)
++            adapter_extra = getattr(adapter_config, "extra", {}) or {}
++            adapter_key = build_session_key(
++                entry.origin,
++                group_sessions_per_user=adapter_extra.get("group_sessions_per_user", True),
++                thread_sessions_per_user=adapter_extra.get("thread_sessions_per_user", False),
++            )
++        except Exception:
++            adapter_key = None
++        target_keys = [entry.session_key]
++        if adapter_key and adapter_key not in target_keys:
++            target_keys.append(adapter_key)
++
++        active_sessions = getattr(adapter, "_active_sessions", {})
++        session_tasks = getattr(adapter, "_session_tasks", {})
++        current_task = asyncio.current_task()
++        target_already_active = False
++        if isinstance(active_sessions, dict):
++            target_already_active = any(key in active_sessions for key in target_keys)
++        if not target_already_active and isinstance(session_tasks, dict):
++            for key in target_keys:
++                task = session_tasks.get(key)
++                if task is None:
++                    continue
++                done = getattr(task, "done", None)
++                if task is current_task or not (done and done()):
++                    target_already_active = True
++                    break
++
++        event = MessageEvent(
++            text=payload,
++            message_type=MessageType.TEXT,
++            source=dataclasses.replace(entry.origin),
++            internal=True,
++            message_id=f"internal-wake:{receipt_id}",
++        )
++        try:
++            setattr(event, "_hermes_internal_wake_receipt_id", receipt_id)
++            if dedupe_key:
++                setattr(event, "_hermes_internal_wake_dedupe_key", dedupe_key)
++            setattr(event, "_hermes_internal_wake_source_kind", source_kind)
++        except Exception:
++            pass
++
++        try:
++            session_db.update_session_wake_receipt(
++                receipt_id,
++                status="dispatched",
++                dispatched=True,
++            )
++            await adapter.handle_message(event)
++            if target_already_active:
++                row = session_db.update_session_wake_receipt(
++                    receipt_id,
++                    status="queued",
++                    dispatched=True,
++                )
++                return {
++                    "status": "queued",
++                    "receipt_id": receipt_id,
++                    "target_session_key": entry.session_key,
++                    "target_session_id": entry.session_id,
++                    "receipt": row,
++                }
++            session_tasks = getattr(adapter, "_session_tasks", {})
++            task = None
++            if isinstance(session_tasks, dict):
++                for key in target_keys:
++                    task = session_tasks.get(key)
++                    if task is not None:
++                        break
++            if task is not None and task is not asyncio.current_task():
++                await asyncio.shield(task)
++            injected_id, assistant_id = self._wake_message_ids_after(
++                entry.session_id,
++                previous_max_id=before_max_id,
++                payload=payload,
++            )
++            status = "agent_responded" if assistant_id is not None else "dispatched"
++            row = session_db.update_session_wake_receipt(
++                receipt_id,
++                status=status,
++                responded=assistant_id is not None,
++                injected_message_id=injected_id,
++                assistant_message_id=assistant_id,
++            )
++            return {
++                "status": status,
++                "receipt_id": receipt_id,
++                "target_session_key": entry.session_key,
++                "target_session_id": entry.session_id,
++                "injected_message_id": injected_id,
++                "assistant_message_id": assistant_id,
++                "receipt": row,
++            }
++        except Exception as exc:
++            error = f"{type(exc).__name__}: {exc}"
++            row = session_db.update_session_wake_receipt(
++                receipt_id,
++                status="failure",
++                error=error,
++            )
++            logger.warning("internal wake failed for %s: %s", entry.session_key, error)
++            return {
++                "status": "failure",
++                "error": error,
++                "receipt_id": receipt_id,
++                "receipt": row,
++            }
++
+     def _schedule_resume_pending_sessions(self, platform=None) -> int:
+         """Auto-continue fresh restart-interrupted sessions after startup.
+ 
+@@ -16323,7 +16584,7 @@ def _run_planned_stop_watcher(
+         stop_event.wait(poll_interval)
+ 
+ 
+-def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
++def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, runner=None, interval: int = 60):
+     """
+     Background thread that ticks the cron scheduler at a regular interval.
+     
+@@ -16350,7 +16611,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
+     tick_count = 0
+     while not stop_event.is_set():
+         try:
+-            cron_tick(verbose=False, adapters=adapters, loop=loop, sync=False)
++            cron_tick(verbose=False, adapters=adapters, loop=loop, runner=runner, sync=False)
+         except Exception as e:
+             logger.debug("Cron tick error: %s", e)
+ 
+@@ -16817,7 +17078,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool =
+     cron_thread = threading.Thread(
+         target=_start_cron_ticker,
+         args=(cron_stop,),
+-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
++        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(), "runner": runner},
+         daemon=True,
+         name="cron-ticker",
+     )
+diff --git a/gateway/session.py b/gateway/session.py
+index 5548139a6..23d81a946 100644
+--- a/gateway/session.py
++++ b/gateway/session.py
+@@ -1291,6 +1291,14 @@ class SessionStore:
+                 if entry.session_id == session_id:
+                     return entry
+         return None
++
++    def lookup_by_session_key(self, session_key: str) -> Optional[SessionEntry]:
++        """Return the active session entry for an exact session key, if any."""
++        if not session_key:
++            return None
++        with self._lock:
++            self._ensure_loaded_locked()
++            return self._entries.get(session_key)
+     
+     def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
+         """Append a message to a session's transcript (SQLite).
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+index 92db5b42f..dba348895 100644
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -363,6 +363,21 @@ class GatewaySlashCommandsMixin:
+                     chat_id = str(getattr(source, "chat_id", "") or "")
+                     thread_id = str(getattr(source, "thread_id", "") or "")
+                     user_id = str(getattr(source, "user_id", "") or "") or None
++                    # Prefer a gateway-local wake subscription for tasks
++                    # created from an existing lane/session. The notifier still
++                    # stores platform/chat for ownership and adapter lookup, but
++                    # ``user_id=session:<session_key>`` routes terminal events
++                    # through wake_session instead of visible platform send
++                    # loopback. Fall back to the historical user_id metadata if
++                    # a partial test runner lacks a session_store.
++                    try:
++                        store = getattr(self, "session_store", None)
++                        entry = store.get_or_create_session(source) if store is not None else None
++                        session_key = getattr(entry, "session_key", None)
++                        if session_key:
++                            user_id = f"session:{session_key}"
++                    except Exception:
++                        pass
+                     if platform_str and chat_id:
+                         def _sub():
+                             from hermes_cli import kanban_db as _kb
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+index 31c4bf68a..6341b8311 100644
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -686,6 +686,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
+     p_nsub.add_argument("--chat-id", required=True)
+     p_nsub.add_argument("--thread-id", default=None)
+     p_nsub.add_argument("--user-id", default=None)
++    target = p_nsub.add_mutually_exclusive_group()
++    target.add_argument(
++        "--session-key",
++        default=None,
++        help="Wake this existing gateway session key instead of visible platform delivery",
++    )
++    target.add_argument(
++        "--session-id",
++        default=None,
++        help="Wake this existing gateway session id instead of visible platform delivery",
++    )
+     p_nsub.add_argument(
+         "--notifier-profile", default=None,
+         help="Profile gateway that owns/delivers this subscription (default: active profile)",
+@@ -2417,6 +2428,24 @@ def _cmd_stats(args: argparse.Namespace) -> int:
+ 
+ 
+ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
++    wake_user_id = args.user_id
++    if args.session_key:
++        if args.user_id:
++            print(
++                "notify-subscribe: pass either --user-id or --session-key/--session-id, not both",
++                file=sys.stderr,
++            )
++            return 2
++        wake_user_id = f"session:{args.session_key}"
++    elif args.session_id:
++        if args.user_id:
++            print(
++                "notify-subscribe: pass either --user-id or --session-key/--session-id, not both",
++                file=sys.stderr,
++            )
++            return 2
++        wake_user_id = f"session_id:{args.session_id}"
++
+     with kb.connect_closing() as conn:
+         if kb.get_task(conn, args.task_id) is None:
+             print(f"no such task: {args.task_id}", file=sys.stderr)
+@@ -2424,7 +2453,7 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
+         kb.add_notify_sub(
+             conn, task_id=args.task_id,
+             platform=args.platform, chat_id=args.chat_id,
+-            thread_id=args.thread_id, user_id=args.user_id,
++            thread_id=args.thread_id, user_id=wake_user_id,
+             notifier_profile=args.notifier_profile or _profile_author(),
+         )
+     print(f"Subscribed {args.platform}:{args.chat_id}"
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index b684450e6..f9c602ad0 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -7282,6 +7282,34 @@ def add_notify_sub(
+             """,
+             (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
+         )
++        if user_id:
++            # ``INSERT OR IGNORE`` preserves idempotency on the subscription
++            # identity (task/platform/chat/thread).  A later explicit
++            # session-targeted subscribe must still upgrade an older visible
++            # platform notification row so terminal events wake the lane
++            # instead of continuing to post platform noise.  Do not downgrade
++            # an existing session-targeted row back to a plain visible user.
++            conn.execute(
++                """
++                UPDATE kanban_notify_subs
++                   SET user_id = ?
++                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
++                   AND (
++                        user_id IS NULL OR user_id = ''
++                        OR ? LIKE 'session:%'
++                        OR ? LIKE 'session_id:%'
++                   )
++                """,
++                (
++                    user_id,
++                    task_id,
++                    platform,
++                    chat_id,
++                    thread_id or "",
++                    user_id,
++                    user_id,
++                ),
++            )
+         if notifier_profile:
+             # Self-heal legacy rows that predate notifier ownership by
+             # backfilling only when the existing value is unset.
+diff --git a/hermes_state.py b/hermes_state.py
+index 8ffe8c25f..4935cd04a 100644
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -581,12 +581,38 @@ CREATE TABLE IF NOT EXISTS compression_locks (
+     expires_at REAL NOT NULL
+ );
+ 
++CREATE TABLE IF NOT EXISTS session_wake_receipts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    created_at REAL NOT NULL,
++    updated_at REAL NOT NULL,
++    requested_at REAL NOT NULL,
++    dispatched_at REAL,
++    responded_at REAL,
++    source_kind TEXT NOT NULL,
++    target_session_key TEXT NOT NULL,
++    target_session_id TEXT NOT NULL,
++    origin_snapshot TEXT,
++    payload_hash TEXT NOT NULL,
++    payload_preview TEXT,
++    payload_bytes INTEGER NOT NULL DEFAULT 0,
++    status TEXT NOT NULL,
++    injected_message_id INTEGER,
++    assistant_message_id INTEGER,
++    error TEXT,
++    dedupe_key TEXT
++);
++
+ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
+ CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
+ CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+ CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+ CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
++CREATE INDEX IF NOT EXISTS idx_session_wake_receipts_target
++    ON session_wake_receipts(target_session_key, created_at DESC);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_session_wake_receipts_dedupe
++    ON session_wake_receipts(target_session_key, dedupe_key)
++    WHERE dedupe_key IS NOT NULL;
+ """
+ 
+ # Indexes that reference columns added in later schema versions must be
+@@ -2362,6 +2388,122 @@ class SessionDB:
+                 return content
+         return content
+ 
++    def create_session_wake_receipt(
++        self,
++        *,
++        source_kind: str,
++        target_session_key: str,
++        target_session_id: str,
++        origin_snapshot: Optional[Dict[str, Any]],
++        payload_hash: str,
++        payload_preview: str,
++        payload_bytes: int,
++        dedupe_key: Optional[str] = None,
++    ) -> Tuple[Dict[str, Any], bool]:
++        """Create a durable receipt for a gateway-internal session wake.
++
++        Returns ``(row, created)``.  When ``dedupe_key`` has already been used
++        for the same target session, no new row is inserted and the existing row
++        is returned with ``created=False``.
++        """
++        now = time.time()
++        origin_json = json.dumps(origin_snapshot, sort_keys=True) if origin_snapshot else None
++        dedupe_value = str(dedupe_key) if dedupe_key else None
++
++        def _do(conn):
++            cursor = conn.execute(
++                """
++                INSERT OR IGNORE INTO session_wake_receipts (
++                    created_at, updated_at, requested_at, source_kind,
++                    target_session_key, target_session_id, origin_snapshot,
++                    payload_hash, payload_preview, payload_bytes, status,
++                    dedupe_key
++                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?)
++                """,
++                (
++                    now,
++                    now,
++                    now,
++                    source_kind,
++                    target_session_key,
++                    target_session_id,
++                    origin_json,
++                    payload_hash,
++                    payload_preview,
++                    payload_bytes,
++                    dedupe_value,
++                ),
++            )
++            created = cursor.rowcount > 0
++            if created:
++                row_id = cursor.lastrowid
++                row = conn.execute(
++                    "SELECT * FROM session_wake_receipts WHERE id = ?",
++                    (row_id,),
++                ).fetchone()
++            elif dedupe_value is not None:
++                row = conn.execute(
++                    """
++                    SELECT * FROM session_wake_receipts
++                    WHERE target_session_key = ? AND dedupe_key = ?
++                    ORDER BY id LIMIT 1
++                    """,
++                    (target_session_key, dedupe_value),
++                ).fetchone()
++            else:
++                row = None
++            return (dict(row) if row else {}, created)
++
++        return self._execute_write(_do)
++
++    def update_session_wake_receipt(
++        self,
++        receipt_id: int,
++        *,
++        status: Optional[str] = None,
++        dispatched: bool = False,
++        responded: bool = False,
++        injected_message_id: Optional[int] = None,
++        assistant_message_id: Optional[int] = None,
++        error: Optional[str] = None,
++    ) -> Optional[Dict[str, Any]]:
++        """Update a session wake receipt and return the updated row."""
++        now = time.time()
++
++        def _do(conn):
++            fields = ["updated_at = ?"]
++            values: List[Any] = [now]
++            if status is not None:
++                fields.append("status = ?")
++                values.append(status)
++            if dispatched:
++                fields.append("dispatched_at = COALESCE(dispatched_at, ?)")
++                values.append(now)
++            if responded:
++                fields.append("responded_at = COALESCE(responded_at, ?)")
++                values.append(now)
++            if injected_message_id is not None:
++                fields.append("injected_message_id = ?")
++                values.append(injected_message_id)
++            if assistant_message_id is not None:
++                fields.append("assistant_message_id = ?")
++                values.append(assistant_message_id)
++            if error is not None:
++                fields.append("error = ?")
++                values.append(error[:2000])
++            values.append(receipt_id)
++            conn.execute(
++                f"UPDATE session_wake_receipts SET {', '.join(fields)} WHERE id = ?",
++                tuple(values),
++            )
++            row = conn.execute(
++                "SELECT * FROM session_wake_receipts WHERE id = ?",
++                (receipt_id,),
++            ).fetchone()
++            return dict(row) if row else None
++
++        return self._execute_write(_do)
++
+     def append_message(
+         self,
+         session_id: str,
+diff --git a/tests/cron/test_scheduler.py b/tests/cron/test_scheduler.py
+index fd445de8c..3eff4a4f3 100644
+--- a/tests/cron/test_scheduler.py
++++ b/tests/cron/test_scheduler.py
+@@ -1,8 +1,10 @@
+ """Tests for cron/scheduler.py — origin resolution, delivery routing, and error logging."""
+ 
++import asyncio
+ import json
+ import logging
+ import os
++from types import SimpleNamespace
+ from unittest.mock import AsyncMock, patch, MagicMock
+ 
+ import pytest
+@@ -612,7 +614,7 @@ class TestDeliverResultWrapping:
+         media_path = self._safe_media_path(tmp_path, monkeypatch, "cron-voice.mp3")
+ 
+         adapter = AsyncMock()
+-        adapter.send.return_value = MagicMock(success=True)
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
+         adapter.send_voice.return_value = MagicMock(success=True)
+ 
+         pconfig = MagicMock()
+@@ -664,7 +666,7 @@ class TestDeliverResultWrapping:
+         media_path = self._safe_media_path(tmp_path, monkeypatch, "chart.png")
+ 
+         adapter = AsyncMock()
+-        adapter.send.return_value = MagicMock(success=True)
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
+         adapter.send_image_file.return_value = MagicMock(success=True)
+ 
+         pconfig = MagicMock()
+@@ -752,7 +754,7 @@ class TestDeliverResultWrapping:
+         from concurrent.futures import Future
+ 
+         adapter = AsyncMock()
+-        adapter.send.return_value = MagicMock(success=True)
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
+ 
+         pconfig = MagicMock()
+         pconfig.enabled = True
+@@ -837,6 +839,212 @@ class TestDeliverResultWrapping:
+         assert send_mock.call_args.kwargs["thread_id"] == "17585"
+ 
+ 
++class TestDeliverResultInternalWake:
++    """Cron delivery wake is a gateway-local internal wake after visible delivery."""
++
++    @staticmethod
++    def _immediate_threadsafe(coro, _loop):
++        from concurrent.futures import Future
++
++        future = Future()
++        try:
++            future.set_result(asyncio.run(coro))
++        except Exception as exc:  # pragma: no cover - mirrors real Future failure shape
++            future.set_exception(exc)
++        return future
++
++    @staticmethod
++    def _enabled_discord_config():
++        from gateway.config import Platform
++
++        pconfig = MagicMock()
++        pconfig.enabled = True
++        mock_cfg = MagicMock()
++        mock_cfg.platforms = {Platform.DISCORD: pconfig}
++        return mock_cfg
++
++    @staticmethod
++    def _entry(session_key="agent:main:discord:thread:chan:thread", session_id="session-123"):
++        from gateway.config import Platform
++
++        origin = SimpleNamespace(
++            platform=Platform.DISCORD,
++            chat_id="chan",
++            thread_id="thread",
++        )
++        return SimpleNamespace(
++            session_key=session_key,
++            session_id=session_id,
++            origin=origin,
++            updated_at="2026-06-17T13:00:00",
++        )
++
++    def test_successful_delivery_wakes_existing_session_when_gate_enabled(self):
++        from gateway.config import Platform
++
++        adapter = AsyncMock()
++        adapter.send.return_value = MagicMock(success=True, message_id="msg-1", raw_response=None)
++        loop = MagicMock()
++        loop.is_running.return_value = True
++
++        entry = self._entry()
++        runner = SimpleNamespace()
++        runner.session_store = SimpleNamespace(list_sessions=MagicMock(return_value=[entry]))
++        wake_calls = []
++
++        async def wake_session(**kwargs):
++            wake_calls.append(kwargs)
++            return {"status": "queued", "receipt_id": 77}
++
++        runner.wake_session = wake_session
++        job = {
++            "id": "cron-wake-job",
++            "name": "cron wake job",
++            "deliver": "origin",
++            "origin": {"platform": "discord", "chat_id": "chan", "thread_id": "thread"},
++        }
++
++        with patch("gateway.config.load_gateway_config", return_value=self._enabled_discord_config()), \
++             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "wake_agent_on_delivery": True}}), \
++             patch("asyncio.run_coroutine_threadsafe", side_effect=self._immediate_threadsafe):
++            error = _deliver_result(
++                job,
++                "Cron output marker CRON_WAKE_TEST",
++                adapters={Platform.DISCORD: adapter},
++                loop=loop,
++                runner=runner,
++            )
++
++        assert error is None
++        adapter.send.assert_called_once()
++        assert wake_calls == [
++            {
++                "session_key": entry.session_key,
++                "payload": (
++                    "Internal wake from cron delivery: cron job 'cron wake job' "
++                    "(id: cron-wake-job) delivered output into this existing "
++                    "discord session. Consume the delivered cron result and "
++                    "continue if follow-through is needed.\n\n"
++                    "Delivered content:\nCron output marker CRON_WAKE_TEST"
++                ),
++                "source_kind": "cron_delivery",
++                "dedupe_key": "cron_delivery:cron-wake-job:discord:chan:thread:32b9a9f001ff2649fd610c0526870c8e559c7e0936bb9ee2229364537e888f65",
++            }
++        ]
++
++    def test_origin_session_key_is_not_used_for_explicit_different_delivery_target(self):
++        from cron.scheduler import _resolve_cron_wake_target
++
++        origin_entry = self._entry(session_key="origin-session", session_id="origin-id")
++        target_entry = self._entry(session_key="target-session", session_id="target-id")
++        target_entry.origin.chat_id = "other-chan"
++        runner = SimpleNamespace(
++            session_store=SimpleNamespace(list_sessions=MagicMock(return_value=[origin_entry, target_entry]))
++        )
++        job = {
++            "id": "cron-explicit-target",
++            "deliver": "discord:other-chan:thread",
++            "origin": {
++                "platform": "discord",
++                "chat_id": "chan",
++                "thread_id": "thread",
++                "session_key": "origin-session",
++            },
++        }
++        target = {"platform": "discord", "chat_id": "other-chan", "thread_id": "thread"}
++
++        assert _resolve_cron_wake_target(job, target, runner) == {"session_key": "target-session"}
++
++    def test_gate_false_delivers_without_wake_attempt(self):
++        from gateway.config import Platform
++
++        adapter = AsyncMock()
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
++        loop = MagicMock()
++        loop.is_running.return_value = True
++        runner = SimpleNamespace(
++            session_store=SimpleNamespace(list_sessions=MagicMock(return_value=[self._entry()])),
++            wake_session=AsyncMock(return_value={"status": "queued"}),
++        )
++        job = {
++            "id": "cron-no-wake",
++            "deliver": "origin",
++            "origin": {"platform": "discord", "chat_id": "chan", "thread_id": "thread"},
++        }
++
++        with patch("gateway.config.load_gateway_config", return_value=self._enabled_discord_config()), \
++             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "wake_agent_on_delivery": False}}), \
++             patch("asyncio.run_coroutine_threadsafe", side_effect=self._immediate_threadsafe):
++            error = _deliver_result(
++                job,
++                "visible only",
++                adapters={Platform.DISCORD: adapter},
++                loop=loop,
++                runner=runner,
++            )
++
++        assert error is None
++        adapter.send.assert_called_once()
++        runner.wake_session.assert_not_called()
++
++    def test_failed_delivery_does_not_attempt_wake(self):
++        from gateway.config import Platform
++
++        pconfig = MagicMock()
++        pconfig.enabled = True
++        mock_cfg = MagicMock()
++        mock_cfg.platforms = {Platform.DISCORD: pconfig}
++        runner = SimpleNamespace(wake_session=AsyncMock())
++        job = {
++            "id": "cron-failed-delivery",
++            "deliver": "origin",
++            "origin": {"platform": "discord", "chat_id": "chan", "thread_id": "thread"},
++        }
++
++        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
++             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "wake_agent_on_delivery": True}}), \
++             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"error": "network down"})):
++            error = _deliver_result(job, "undelivered", runner=runner)
++
++        assert error is not None
++        assert "network down" in error
++        runner.wake_session.assert_not_called()
++
++    def test_unavailable_target_does_not_break_visible_delivery(self, caplog):
++        from gateway.config import Platform
++
++        adapter = AsyncMock()
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
++        loop = MagicMock()
++        loop.is_running.return_value = True
++        runner = SimpleNamespace(
++            session_store=SimpleNamespace(list_sessions=MagicMock(return_value=[])),
++            wake_session=AsyncMock(return_value={"status": "queued"}),
++        )
++        job = {
++            "id": "cron-no-session",
++            "deliver": "origin",
++            "origin": {"platform": "discord", "chat_id": "chan", "thread_id": "thread"},
++        }
++
++        with caplog.at_level(logging.INFO, logger="cron.scheduler"), \
++             patch("gateway.config.load_gateway_config", return_value=self._enabled_discord_config()), \
++             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "wake_agent_on_delivery": True}}), \
++             patch("asyncio.run_coroutine_threadsafe", side_effect=self._immediate_threadsafe):
++            error = _deliver_result(
++                job,
++                "delivered without session",
++                adapters={Platform.DISCORD: adapter},
++                loop=loop,
++                runner=runner,
++            )
++
++        assert error is None
++        adapter.send.assert_called_once()
++        runner.wake_session.assert_not_called()
++        assert "wake skipped" in caplog.text
++
++
+ class TestDeliverResultErrorReturns:
+     """Verify _deliver_result returns error strings on failure, None on success."""
+ 
+@@ -2487,7 +2695,7 @@ class TestDeliverResultTimeoutCancelsFuture:
+ 
+         # Live adapter whose send() coroutine never resolves within the budget
+         adapter = AsyncMock()
+-        adapter.send.return_value = MagicMock(success=True)
++        adapter.send.return_value = MagicMock(success=True, raw_response=None)
+ 
+         pconfig = MagicMock()
+         pconfig.enabled = True
+diff --git a/tests/gateway/test_internal_session_wake.py b/tests/gateway/test_internal_session_wake.py
+new file mode 100644
+index 000000000..df4d136f5
+--- /dev/null
++++ b/tests/gateway/test_internal_session_wake.py
+@@ -0,0 +1,464 @@
++import asyncio
++import json
++from unittest.mock import AsyncMock
++
++from gateway.config import GatewayConfig, Platform, PlatformConfig
++from gateway.platforms.base import MessageEvent
++from gateway.run import GatewayRunner
++from gateway.session import SessionSource
++import hermes_state
++
++from tests.gateway.restart_test_helpers import RestartTestAdapter
++
++
++class WakeAdapter:
++    def __init__(self, runner):
++        self.runner = runner
++        self.events = []
++        self._session_tasks = {}
++        self._pending_messages = {}
++
++    async def handle_message(self, event: MessageEvent):
++        self.events.append(event)
++        return await self.runner._handle_message(event)
++
++    async def send(self, chat_id, text, **kwargs):
++        return None
++
++
++class ActiveWakeAdapter(WakeAdapter):
++    def __init__(self, runner):
++        super().__init__(runner)
++        self._active_sessions = {}
++
++    async def handle_message(self, event: MessageEvent):
++        self.events.append(event)
++        session_key = self.runner.session_store.get_or_create_session(event.source).session_key
++        if session_key in self._active_sessions:
++            self._pending_messages[session_key] = event
++            return None
++        return await self.runner._handle_message(event)
++
++
++def _runner(monkeypatch, tmp_path):
++    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
++    runner = GatewayRunner(
++        GatewayConfig(
++            platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="test-token")}
++        )
++    )
++    runner.adapters = {Platform.TELEGRAM: WakeAdapter(runner)}
++    calls = []
++
++    async def fake_run_agent(**kwargs):
++        calls.append(kwargs)
++        history = kwargs.get("history") or []
++        session_id = kwargs["session_id"]
++        message = kwargs["message"]
++        runner._session_db.append_message(session_id, "user", message)
++        runner._session_db.append_message(
++            session_id,
++            "assistant",
++            f"acknowledged wake: {message}",
++        )
++        return {
++            "final_response": f"acknowledged wake: {message}",
++            "messages": [
++                *history,
++                {"role": "user", "content": message},
++                {"role": "assistant", "content": f"acknowledged wake: {message}"},
++            ],
++            "history_offset": len(history),
++            "api_calls": 1,
++            "last_prompt_tokens": 12,
++            "tools": [],
++        }
++
++    monkeypatch.setattr(runner, "_run_agent", fake_run_agent)
++    runner._is_user_authorized = lambda _source: False
++    return runner, calls
++
++
++def _origin(chat_id="lane-42"):
++    return SessionSource(
++        platform=Platform.TELEGRAM,
++        chat_id=chat_id,
++        chat_type="dm",
++        user_id="zoe",
++        user_name="Zoe",
++        is_bot=False,
++    )
++
++
++def _receipt_rows(runner, session_key):
++    with runner._session_db._lock:
++        return [
++            dict(row)
++            for row in runner._session_db._conn.execute(
++                "SELECT * FROM session_wake_receipts WHERE target_session_key = ? ORDER BY id",
++                (session_key,),
++            ).fetchall()
++        ]
++
++
++def test_internal_wake_reuses_existing_session_origin_and_records_agent_response(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    entry = runner.session_store.get_or_create_session(_origin("lane-origin"))
++
++    result = asyncio.run(
++        runner.wake_session(
++            session_key=entry.session_key,
++            payload="INTERNAL_WAKE_TEST_ORIGIN",
++            source_kind="kanban",
++            dedupe_key="origin-once",
++        )
++    )
++
++    assert result["status"] == "agent_responded"
++    assert len(calls) == 1
++    assert calls[0]["session_id"] == entry.session_id
++    assert calls[0]["source"].user_id == "zoe"
++    assert calls[0]["source"].user_name == "Zoe"
++    assert calls[0]["source"].is_bot is False
++    assert runner.adapters[Platform.TELEGRAM].events[0].internal is True
++    assert runner.adapters[Platform.TELEGRAM].events[0].source == entry.origin
++
++    messages = runner._session_db.get_messages(entry.session_id)
++    conversational = [m for m in messages if m["role"] in {"user", "assistant"}]
++    assert [m["role"] for m in conversational[-2:]] == ["user", "assistant"]
++    assert conversational[-2]["content"] == "INTERNAL_WAKE_TEST_ORIGIN"
++    assert conversational[-1]["content"] == "acknowledged wake: INTERNAL_WAKE_TEST_ORIGIN"
++
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    receipt = rows[0]
++    assert receipt["status"] == "agent_responded"
++    assert receipt["source_kind"] == "kanban"
++    assert receipt["target_session_key"] == entry.session_key
++    assert receipt["target_session_id"] == entry.session_id
++    assert receipt["injected_message_id"] == conversational[-2]["id"]
++    assert receipt["assistant_message_id"] == conversational[-1]["id"]
++    assert json.loads(receipt["origin_snapshot"])["user_id"] == "zoe"
++    assert receipt["payload_hash"]
++    assert receipt["payload_preview"] == "INTERNAL_WAKE_TEST_ORIGIN"
++
++
++def test_internal_wake_dedupe_key_prevents_duplicate_injection(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    entry = runner.session_store.get_or_create_session(_origin("lane-dedupe"))
++
++    first = asyncio.run(
++        runner.wake_session(
++            session_key=entry.session_key,
++            payload="INTERNAL_WAKE_TEST_DEDUPE",
++            source_kind="cron",
++            dedupe_key="same-marker",
++        )
++    )
++    second = asyncio.run(
++        runner.wake_session(
++            session_key=entry.session_key,
++            payload="INTERNAL_WAKE_TEST_DEDUPE",
++            source_kind="cron",
++            dedupe_key="same-marker",
++        )
++    )
++
++    assert first["status"] == "agent_responded"
++    assert second["status"] == "deduped"
++    assert len(calls) == 1
++    assert len(runner.adapters[Platform.TELEGRAM].events) == 1
++    assert [m["content"] for m in runner._session_db.get_messages(entry.session_id)].count(
++        "INTERNAL_WAKE_TEST_DEDUPE"
++    ) == 1
++
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "agent_responded"
++    assert rows[0]["dedupe_key"] == "same-marker"
++
++
++def test_internal_wake_receipt_records_failure_when_adapter_unavailable(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    entry = runner.session_store.get_or_create_session(_origin("lane-failure"))
++    adapter = runner.adapters[Platform.TELEGRAM]
++    runner.adapters = {}
++
++    result = asyncio.run(
++        runner.wake_session(
++            session_key=entry.session_key,
++            payload="INTERNAL_WAKE_TEST_FAILURE",
++            source_kind="cron",
++            dedupe_key="failure-marker",
++        )
++    )
++
++    assert result["status"] == "failure"
++    assert "adapter unavailable" in result["error"]
++    assert calls == []
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "failure"
++    assert rows[0]["error"] == result["error"]
++    assert rows[0]["dispatched_at"] is None
++    assert rows[0]["responded_at"] is None
++
++    runner.adapters = {Platform.TELEGRAM: adapter}
++    retry = asyncio.run(
++        runner.wake_session(
++            session_key=entry.session_key,
++            payload="INTERNAL_WAKE_TEST_FAILURE",
++            source_kind="cron",
++            dedupe_key="failure-marker",
++        )
++    )
++
++    assert retry["status"] == "agent_responded"
++    assert len(calls) == 1
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "agent_responded"
++    assert rows[0]["assistant_message_id"] is not None
++
++
++def test_internal_wake_can_target_by_session_id(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    entry = runner.session_store.get_or_create_session(_origin("lane-session-id"))
++
++    result = asyncio.run(
++        runner.wake_session(
++            session_id=entry.session_id,
++            payload="INTERNAL_WAKE_TEST_SESSION_ID",
++            source_kind="kanban",
++        )
++    )
++
++    assert result["status"] == "agent_responded"
++    assert calls[0]["session_id"] == entry.session_id
++    assert calls[0]["source"] == entry.origin
++
++
++def test_internal_wake_queues_for_active_session_without_awaiting_running_task(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    adapter = ActiveWakeAdapter(runner)
++    runner.adapters = {Platform.TELEGRAM: adapter}
++    entry = runner.session_store.get_or_create_session(_origin("lane-active"))
++
++    async def scenario():
++        never_done = asyncio.Event()
++        running_task = asyncio.create_task(never_done.wait())
++        adapter._active_sessions[entry.session_key] = asyncio.Event()
++        adapter._session_tasks[entry.session_key] = running_task
++        try:
++            return await asyncio.wait_for(
++                runner.wake_session(
++                    session_key=entry.session_key,
++                    payload="INTERNAL_WAKE_TEST_ACTIVE_QUEUE",
++                    source_kind="send_message",
++                    dedupe_key="active-queue-marker",
++                ),
++                timeout=0.2,
++            )
++        finally:
++            running_task.cancel()
++            await asyncio.gather(running_task, return_exceptions=True)
++
++    result = asyncio.run(scenario())
++
++    assert result["status"] == "queued"
++    assert calls == []
++    assert adapter.events[0].internal is True
++    assert adapter._pending_messages[entry.session_key].text == "INTERNAL_WAKE_TEST_ACTIVE_QUEUE"
++
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "queued"
++    assert rows[0]["dispatched_at"] is not None
++    assert rows[0]["responded_at"] is None
++
++
++def test_internal_wake_queues_active_base_adapter_without_interrupting_running_agent(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    adapter = RestartTestAdapter()
++    adapter.set_message_handler(AsyncMock(return_value=None))
++    adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
++    runner.adapters = {Platform.TELEGRAM: adapter}
++    runner._is_user_authorized = lambda _source: True
++    runner._busy_input_mode = "interrupt"
++    runner._busy_text_mode = "interrupt"
++    entry = runner.session_store.get_or_create_session(_origin("lane-base-active"))
++
++    interrupt_calls = []
++
++    class RunningAgent:
++        def interrupt(self, reason):
++            interrupt_calls.append(reason)
++
++        def get_activity_summary(self):
++            return {}
++
++    async def scenario():
++        never_done = asyncio.Event()
++        running_task = asyncio.create_task(never_done.wait())
++        adapter._active_sessions[entry.session_key] = asyncio.Event()
++        adapter._session_tasks[entry.session_key] = running_task
++        runner._running_agents[entry.session_key] = RunningAgent()
++        try:
++            return await asyncio.wait_for(
++                runner.wake_session(
++                    session_key=entry.session_key,
++                    payload="INTERNAL_WAKE_TEST_BASE_ACTIVE_QUEUE",
++                    source_kind="send_message",
++                    dedupe_key="base-active-queue-marker",
++                ),
++                timeout=0.2,
++            )
++        finally:
++            running_task.cancel()
++            await asyncio.gather(running_task, return_exceptions=True)
++
++    result = asyncio.run(scenario())
++
++    assert result["status"] == "queued"
++    assert calls == []
++    assert interrupt_calls == []
++    pending = adapter._pending_messages[entry.session_key]
++    assert pending.internal is True
++    assert pending.text == "INTERNAL_WAKE_TEST_BASE_ACTIVE_QUEUE"
++    assert adapter.sent == []
++
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "queued"
++    assert rows[0]["dispatched_at"] is not None
++    assert rows[0]["responded_at"] is None
++
++
++def test_internal_wake_queues_active_base_adapter_without_resolving_pending_clarify(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    adapter = RestartTestAdapter()
++    adapter.set_message_handler(runner._handle_message)
++    adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
++    runner.adapters = {Platform.TELEGRAM: adapter}
++    runner._is_user_authorized = lambda source: True
++    runner._busy_input_mode = "interrupt"
++    runner._busy_text_mode = "interrupt"
++    entry = runner.session_store.get_or_create_session(_origin("lane-clarify-active"))
++
++    interrupt_calls = []
++
++    class RunningAgent:
++        def interrupt(self, reason):
++            interrupt_calls.append(reason)
++
++        def get_activity_summary(self):
++            return {}
++
++    from tools import clarify_gateway as clarify_mod
++
++    clarify_id = "internal-wake-clarify-active"
++    clarify_entry = clarify_mod.register(
++        clarify_id,
++        entry.session_key,
++        "Human answer?",
++        None,
++    )
++
++    async def scenario():
++        never_done = asyncio.Event()
++        running_task = asyncio.create_task(never_done.wait())
++        adapter._active_sessions[entry.session_key] = asyncio.Event()
++        adapter._session_tasks[entry.session_key] = running_task
++        runner._running_agents[entry.session_key] = RunningAgent()
++        try:
++            return await asyncio.wait_for(
++                runner.wake_session(
++                    session_key=entry.session_key,
++                    payload="INTERNAL_WAKE_TEST_CLARIFY_ACTIVE_QUEUE",
++                    source_kind="send_message",
++                    dedupe_key="clarify-active-queue-marker",
++                ),
++                timeout=0.2,
++            )
++        finally:
++            running_task.cancel()
++            await asyncio.gather(running_task, return_exceptions=True)
++
++    try:
++        result = asyncio.run(scenario())
++
++        assert result["status"] == "queued"
++        assert calls == []
++        assert interrupt_calls == []
++        assert clarify_entry.response is None
++        pending = adapter._pending_messages[entry.session_key]
++        assert pending.internal is True
++        assert pending.text == "INTERNAL_WAKE_TEST_CLARIFY_ACTIVE_QUEUE"
++        assert adapter.sent == []
++
++        rows = _receipt_rows(runner, entry.session_key)
++        assert len(rows) == 1
++        assert rows[0]["status"] == "queued"
++        assert rows[0]["dispatched_at"] is not None
++        assert rows[0]["responded_at"] is None
++    finally:
++        clarify_mod.clear_session(entry.session_key)
++
++
++def test_internal_wake_queues_active_base_adapter_even_with_slash_command_payload(monkeypatch, tmp_path):
++    runner, calls = _runner(monkeypatch, tmp_path)
++    adapter = RestartTestAdapter()
++    message_handler = AsyncMock(return_value=None)
++    adapter.set_message_handler(message_handler)
++    adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
++    runner.adapters = {Platform.TELEGRAM: adapter}
++    runner._is_user_authorized = lambda source: True
++    runner._busy_input_mode = "interrupt"
++    runner._busy_text_mode = "interrupt"
++    entry = runner.session_store.get_or_create_session(_origin("lane-command-active"))
++
++    interrupt_calls = []
++
++    class RunningAgent:
++        def interrupt(self, reason):
++            interrupt_calls.append(reason)
++
++        def get_activity_summary(self):
++            return {}
++
++    async def scenario():
++        never_done = asyncio.Event()
++        running_task = asyncio.create_task(never_done.wait())
++        adapter._active_sessions[entry.session_key] = asyncio.Event()
++        adapter._session_tasks[entry.session_key] = running_task
++        runner._running_agents[entry.session_key] = RunningAgent()
++        try:
++            return await asyncio.wait_for(
++                runner.wake_session(
++                    session_key=entry.session_key,
++                    payload="/status INTERNAL_WAKE_TEST_COMMAND_ACTIVE_QUEUE",
++                    source_kind="send_message",
++                    dedupe_key="command-active-queue-marker",
++                ),
++                timeout=0.2,
++            )
++        finally:
++            running_task.cancel()
++            await asyncio.gather(running_task, return_exceptions=True)
++
++    result = asyncio.run(scenario())
++
++    assert result["status"] == "queued"
++    assert calls == []
++    assert interrupt_calls == []
++    message_handler.assert_not_awaited()
++    pending = adapter._pending_messages[entry.session_key]
++    assert pending.internal is True
++    assert pending.text == "/status INTERNAL_WAKE_TEST_COMMAND_ACTIVE_QUEUE"
++    assert adapter.sent == []
++
++    rows = _receipt_rows(runner, entry.session_key)
++    assert len(rows) == 1
++    assert rows[0]["status"] == "queued"
++    assert rows[0]["dispatched_at"] is not None
++    assert rows[0]["responded_at"] is None
+diff --git a/tests/gateway/test_kanban_notifier.py b/tests/gateway/test_kanban_notifier.py
+index 9dd5aa374..550ae1fd4 100644
+--- a/tests/gateway/test_kanban_notifier.py
++++ b/tests/gateway/test_kanban_notifier.py
+@@ -1,5 +1,6 @@
+ import asyncio
+ from pathlib import Path
++from unittest.mock import AsyncMock
+ 
+ 
+ from gateway.config import Platform
+@@ -173,6 +174,47 @@ def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
+     assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
+ 
+ 
++def test_kanban_notifier_internal_session_subscription_uses_wake_not_send(tmp_path, monkeypatch):
++    db_path = tmp_path / "internal-wake.db"
++    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
++    kb.init_db()
++
++    conn = kb.connect()
++    try:
++        tid = kb.create_task(conn, title="wake task", assignee="worker")
++        kb.add_notify_sub(
++            conn,
++            task_id=tid,
++            platform="telegram",
++            chat_id="chat-1",
++            user_id="session:agent:main:telegram:dm:lane-1",
++        )
++        kb.complete_task(
++            conn,
++            tid,
++            summary="wake me internally",
++            metadata={"artifacts": [str(tmp_path / "artifact.txt")]},
++        )
++    finally:
++        conn.close()
++
++    adapter = RecordingAdapter()
++    runner = _make_runner(adapter)
++    runner.wake_session = AsyncMock(return_value={"status": "agent_responded", "receipt_id": 99})
++    runner._deliver_kanban_artifacts = AsyncMock()
++
++    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
++
++    assert adapter.sent == []
++    runner._deliver_kanban_artifacts.assert_not_awaited()
++    runner.wake_session.assert_awaited_once()
++    kwargs = runner.wake_session.await_args.kwargs
++    assert kwargs["session_key"] == "agent:main:telegram:dm:lane-1"
++    assert kwargs["source_kind"] == "kanban"
++    assert kwargs["dedupe_key"].startswith(f"kanban:default:{tid}:")
++    assert "Kanban" in kwargs["payload"]
++
++
+ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
+     """A retry cycle (crashed → reclaimed → crashed) notifies the user twice.
+ 
+diff --git a/tests/hermes_cli/test_kanban_core_functionality.py b/tests/hermes_cli/test_kanban_core_functionality.py
+index 2762e220e..1dddffd8d 100644
+--- a/tests/hermes_cli/test_kanban_core_functionality.py
++++ b/tests/hermes_cli/test_kanban_core_functionality.py
+@@ -868,6 +868,50 @@ def test_cli_notify_subscribe_and_list(kanban_home):
+     assert "Unsubscribed" in rm
+ 
+ 
++def test_cli_notify_subscribe_can_target_existing_session_wake(kanban_home):
++    tid = run_slash("create 'x' --json")
++    tid = json.loads(tid)["id"]
++
++    out = run_slash(
++        f"notify-subscribe {tid} --platform telegram --chat-id 999 "
++        "--session-key agent:main:telegram:dm:user-1",
++    )
++
++    assert "Subscribed" in out
++    lst = run_slash("notify-list --json")
++    subs = json.loads(lst)
++    assert any(
++        s["task_id"] == tid
++        and s["platform"] == "telegram"
++        and s["chat_id"] == "999"
++        and s["user_id"] == "session:agent:main:telegram:dm:user-1"
++        for s in subs
++    )
++
++
++def test_cli_notify_subscribe_session_target_upgrades_existing_visible_sub(kanban_home):
++    tid = run_slash("create 'x' --json")
++    tid = json.loads(tid)["id"]
++
++    visible = run_slash(
++        f"notify-subscribe {tid} --platform telegram --chat-id 999 --user-id zoe",
++    )
++    internal = run_slash(
++        f"notify-subscribe {tid} --platform telegram --chat-id 999 "
++        "--session-key agent:main:telegram:dm:user-1",
++    )
++
++    assert "Subscribed" in visible
++    assert "Subscribed" in internal
++    lst = run_slash("notify-list --json")
++    subs = [
++        s for s in json.loads(lst)
++        if s["task_id"] == tid and s["platform"] == "telegram" and s["chat_id"] == "999"
++    ]
++    assert len(subs) == 1
++    assert subs[0]["user_id"] == "session:agent:main:telegram:dm:user-1"
++
++
+ def test_cli_log_missing_task(kanban_home):
+     # No such task → exit-style (no log for...) message on stderr, returned
+     # in combined output.
+diff --git a/tests/tools/test_send_message_tool.py b/tests/tools/test_send_message_tool.py
+index 81cee1bb1..aad479881 100644
+--- a/tests/tools/test_send_message_tool.py
++++ b/tests/tools/test_send_message_tool.py
+@@ -240,6 +240,156 @@ class TestSendMessageTool:
+         send_mock.assert_not_awaited()
+         mirror_mock.assert_not_called()
+ 
++    def test_successful_mirror_schedules_internal_wake_on_live_gateway(self):
++        config, telegram_cfg = _make_config()
++        wake_session = AsyncMock(return_value={"status": "agent_responded", "receipt_id": 42})
++        gateway_loop = object()
++        runner = SimpleNamespace(wake_session=wake_session, _gateway_loop=gateway_loop)
++        scheduled = {}
++
++        class _NonBlockingFuture:
++            def result(self, timeout=None):  # pragma: no cover - must not be called
++                raise AssertionError("send_message must not block on wake_session")
++
++        def _schedule_without_waiting(coro, loop, **_kwargs):
++            scheduled["loop"] = loop
++            # The real helper schedules this coroutine on the gateway loop. The
++            # test closes it because we deliberately do not run or await it here.
++            coro.close()
++            return _NonBlockingFuture()
++
++        with patch("gateway.config.load_gateway_config", return_value=config), \
++             patch("tools.interrupt.is_interrupted", return_value=False), \
++             patch("model_tools._run_async", side_effect=_run_async_immediately), \
++             patch(
++                 "tools.send_message_tool._send_to_platform",
++                 new=AsyncMock(return_value={"success": True, "message_id": "m-1"}),
++             ) as send_mock, \
++             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock, \
++             patch("gateway.mirror.find_session_id", return_value="target-session-id"), \
++             patch("gateway.run._gateway_runner_ref", return_value=runner), \
++             patch("agent.async_utils.safe_schedule_threadsafe", side_effect=_schedule_without_waiting):
++            result = json.loads(
++                send_message_tool(
++                    {
++                        "action": "send",
++                        "target": "telegram:12345",
++                        "message": "wake the existing lane",
++                    }
++                )
++            )
++
++        assert result["success"] is True
++        assert result["mirrored"] is True
++        assert result["woke_agent"] is True
++        assert result["wake_agent_status"] == "scheduled"
++        assert "wake_receipt_id" not in result
++        assert scheduled["loop"] is gateway_loop
++        send_mock.assert_awaited_once_with(
++            Platform.TELEGRAM,
++            telegram_cfg,
++            "12345",
++            "wake the existing lane",
++            thread_id=None,
++            media_files=[],
++            force_document=False,
++        )
++        mirror_mock.assert_called_once()
++        wake_session.assert_called_once()
++        wake_session.assert_not_awaited()
++        wake_kwargs = wake_session.call_args.kwargs
++        assert wake_kwargs["session_id"] == "target-session-id"
++        assert wake_kwargs["source_kind"] == "send_message"
++        assert wake_kwargs["dedupe_key"].startswith("send_message:telegram:12345:")
++        assert "wake the existing lane" in wake_kwargs["payload"]
++
++    def test_successful_mirror_same_active_session_wake_is_scheduled_without_blocking(self, monkeypatch, tmp_path):
++        import hermes_state
++        from gateway.config import GatewayConfig, PlatformConfig
++        from gateway.run import GatewayRunner
++        from gateway.session import SessionSource
++
++        config, telegram_cfg = _make_config()
++        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
++        runner = GatewayRunner(
++            GatewayConfig(
++                platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="test-token")}
++            )
++        )
++        runner._gateway_loop = object()
++        entry = runner.session_store.get_or_create_session(
++            SessionSource(
++                platform=Platform.TELEGRAM,
++                chat_id="12345",
++                chat_type="dm",
++                user_id="zoe",
++                user_name="Zoe",
++                is_bot=False,
++            )
++        )
++
++        class _NotAwaitableRunningTask:
++            def done(self):
++                return False
++
++        class _ActiveAdapter:
++            config = telegram_cfg
++
++            def __init__(self):
++                self._active_sessions = {entry.session_key: asyncio.Event()}
++                self._session_tasks = {entry.session_key: _NotAwaitableRunningTask()}
++                self._pending_messages = {}
++
++            async def handle_message(self, event):
++                self._pending_messages[entry.session_key] = event
++
++        class _NonBlockingFuture:
++            def result(self, timeout=None):  # pragma: no cover - must not be called
++                raise AssertionError("send_message must not block on wake_session")
++
++        scheduled = {}
++
++        def _schedule_and_run_for_test(coro, loop, **_kwargs):
++            scheduled["loop"] = loop
++            # Run the coroutine here so the test can inspect the queued event,
++            # but return a future whose result() would fail if the tool waited.
++            scheduled["wake_result"] = asyncio.run(coro)
++            return _NonBlockingFuture()
++
++        adapter = _ActiveAdapter()
++        runner.adapters = {Platform.TELEGRAM: adapter}
++
++        with patch("gateway.config.load_gateway_config", return_value=config), \
++             patch("tools.interrupt.is_interrupted", return_value=False), \
++             patch(
++                 "tools.send_message_tool._send_to_platform",
++                 new=AsyncMock(return_value={"success": True, "message_id": "m-1"}),
++             ), \
++             patch("gateway.mirror.mirror_to_session", return_value=True), \
++             patch("gateway.mirror.find_session_id", return_value=entry.session_id), \
++             patch("gateway.run._gateway_runner_ref", return_value=runner), \
++             patch("agent.async_utils.safe_schedule_threadsafe", side_effect=_schedule_and_run_for_test):
++            result = json.loads(
++                send_message_tool(
++                    {
++                        "action": "send",
++                        "target": "telegram:12345",
++                        "message": "queue wake for active lane",
++                    }
++                )
++            )
++
++        assert result["success"] is True
++        assert result["mirrored"] is True
++        assert result["woke_agent"] is True
++        assert result["wake_agent_status"] == "scheduled"
++        assert scheduled["loop"] is runner._gateway_loop
++        assert scheduled["wake_result"]["status"] == "queued"
++        assert adapter._pending_messages[entry.session_key].internal is True
++        assert adapter._pending_messages[entry.session_key].text.startswith(
++            "Internal wake from send_message:"
++        )
++
+     def test_resolved_telegram_topic_name_preserves_thread_id(self):
+         config, telegram_cfg = _make_config()
+ 
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index 7ec31b806..23fea037e 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -277,12 +277,19 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
+                 "Cron origin captured thread_id=%s for %s:%s",
+                 thread_id, origin_platform, origin_chat_id,
+             )
+-        return {
++        origin = {
+             "platform": origin_platform,
+             "chat_id": origin_chat_id,
+             "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
+             "thread_id": thread_id,
+         }
++        session_key = get_session_env("HERMES_SESSION_KEY") or None
++        session_id = get_session_env("HERMES_SESSION_ID") or None
++        if session_key:
++            origin["session_key"] = session_key
++        if session_id:
++            origin["session_id"] = session_id
++        return origin
+     return None
+ 
+ 
+diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
+index 3bbcbff8b..11d6481d9 100644
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -6,6 +6,7 @@ human-friendly channel names to IDs. Works in both CLI and gateway contexts.
+ """
+ 
+ import asyncio
++import hashlib
+ import json
+ import logging
+ import os
+@@ -439,24 +440,102 @@ def _handle_send(args):
+         if used_home_channel and isinstance(result, dict) and result.get("success"):
+             result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
+ 
+-        # Mirror the sent message into the target's gateway session
++        # Mirror the sent message into the target's gateway session, then wake
++        # that live session when this tool is executing inside the gateway
++        # process.  The mirror preserves the visible outbound delivery record;
++        # the internal wake is the deliberate control-plane event that causes
++        # the target lane's agent to actually consume the new context.
+         if isinstance(result, dict) and result.get("success") and mirror_text:
+             try:
+-                from gateway.mirror import mirror_to_session
++                from gateway.mirror import find_session_id, mirror_to_session
+                 from gateway.session_context import get_session_env
+                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
+                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+-                if mirror_to_session(
++                mirrored = mirror_to_session(
+                     platform_name,
+                     chat_id,
+                     mirror_text,
+                     source_label=source_label,
+                     thread_id=thread_id,
+                     user_id=user_id,
+-                ):
++                )
++                if mirrored:
+                     result["mirrored"] = True
++                    target_session_id = find_session_id(
++                        platform_name,
++                        chat_id,
++                        thread_id=thread_id,
++                        user_id=user_id,
++                    )
++                    runner = None
++                    try:
++                        from gateway.run import _gateway_runner_ref
++                        runner = _gateway_runner_ref()
++                    except Exception:
++                        runner = None
++                    wake_fn = getattr(runner, "wake_session", None) if runner is not None else None
++                    if target_session_id and callable(wake_fn):
++                        message_id = str(result.get("message_id") or "")
++                        dedupe_material = "\0".join([
++                            platform_name,
++                            str(chat_id),
++                            str(thread_id or ""),
++                            message_id,
++                            mirror_text,
++                        ])
++                        dedupe_hash = hashlib.sha256(
++                            dedupe_material.encode("utf-8", errors="replace")
++                        ).hexdigest()
++                        wake_payload = (
++                            "Internal wake from send_message: an outbound message "
++                            f"was delivered into this existing {platform_name} session "
++                            f"by {source_label}. Consume the mirrored transcript "
++                            "context and continue if follow-through is needed.\n\n"
++                            f"Sent content:\n{mirror_text}"
++                        )
++                        try:
++                            from agent.async_utils import safe_schedule_threadsafe
++                            wake_future = safe_schedule_threadsafe(
++                                wake_fn(
++                                    session_id=target_session_id,
++                                    payload=wake_payload,
++                                    source_kind="send_message",
++                                    dedupe_key=(
++                                        f"send_message:{platform_name}:{chat_id}:"
++                                        f"{thread_id or ''}:{dedupe_hash}"
++                                    ),
++                                ),
++                                getattr(runner, "_gateway_loop", None),
++                                logger=logger,
++                                log_message=(
++                                    "send_message internal wake: failed to schedule "
++                                    "on gateway loop"
++                                ),
++                            )
++                        except Exception as wake_exc:
++                            logger.debug("send_message internal wake scheduling failed: %s", wake_exc)
++                            wake_future = None
++                            result["wake_agent_status"] = "failure"
++                            result["wake_error"] = _sanitize_error_text(
++                                f"{type(wake_exc).__name__}: {wake_exc}"
++                            )
++                        if wake_future is None and "wake_agent_status" not in result:
++                            result["wake_agent_status"] = "failure"
++                            result["wake_error"] = (
++                                "gateway loop unavailable for send_message internal wake"
++                            )
++                        elif wake_future is not None:
++                            # Do not call wake_future.result() here: for an idle
++                            # target session, wake_session may run the target
++                            # agent turn and wait for its response. The sending
++                            # tool only schedules the control-plane wake; the
++                            # durable receipt carries the eventual outcome.
++                            result["wake_agent_status"] = "scheduled"
++                            result["woke_agent"] = True
++                    elif target_session_id:
++                        result["wake_agent_status"] = "unavailable"
+             except Exception:
+-                pass
++                logger.debug("send_message mirror/internal wake failed", exc_info=True)
+ 
+         if isinstance(result, dict) and "error" in result:
+             result["error"] = _sanitize_error_text(result["error"])

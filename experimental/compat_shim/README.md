@@ -1,20 +1,23 @@
-# Experimental Compatibility Shim
+# Compat Shim
 
-**This directory is intentionally disabled-by-default.**
+This directory previously held an experimental, documentation-only compat
+shim. **The shim is now a real, supported implementation** at
+`self_wake/compat_shim.py`.
 
-If enabled, it provides a monkeypatch-based compatibility layer for
-vanilla Hermes installations that lack `internal_session_wake_v1`.
+See:
+- `docs/compatibility.md` — what the shim provides, fail-closed drift behavior,
+  native preference, and the honest list of what it does NOT provide.
+- `self_wake/compat_shim.py` — the implementation (module docstring documents
+  every private Hermes internal it touches and why).
 
-## Warnings
+Enable it in `config.yaml`:
 
-- This is NOT the recommended install path
-- Monkeypatches private gateway/session/cron internals
-- Highly sensitive to Hermes version changes
-- Silently violates prompt-caching and role-alternation invariants
-- Must be explicitly enabled via config: `self_wake.compat_shim.enabled: true`
-- Fail-closed if target method signatures/source hashes are unknown
+```yaml
+self_wake:
+  compat_shim_enabled: true
+```
 
-## Recommended path
-
-Apply the clean core patch from `docs/core-patch/` instead, or upgrade
-to a Hermes version that includes `internal_session_wake_v1`.
+The shim provides `internal_session_wake_v1` on vanilla Hermes at runtime
+(`wake_session`, receipt methods, session lookup, receipts table, and Kanban
+notifier routing) without patching Hermes core. It fails closed if private
+Hermes internals drift, and defers to a native capability when present.

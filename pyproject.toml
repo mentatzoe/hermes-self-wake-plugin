@@ -1,11 +1,11 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-self-wake"
-version = "1.0.0"
-description = "Formal operator tools for Hermes internal session wake routing"
+version = "1.1.0"
+description = "Portable operator tools for Hermes internal session wake routing; bundles a compat shim for vanilla Hermes (native/shim/inspect-only modes)."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

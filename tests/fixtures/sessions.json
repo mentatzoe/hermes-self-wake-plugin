@@ -1,11 +1,53 @@
-[
-  {
-    "session_key": "agent:test:discord:channel:123:456",
-    "session_id": "20260101_120000_abcdef",
+{
+  "agent:main:discord:thread:1511162896762142980:1511162896762142980": {
+    "session_key": "agent:main:discord:thread:1511162896762142980:1511162896762142980",
+    "session_id": "20260101_120000_aaaaaa",
+    "created_at": "2026-01-01T12:00:00",
+    "updated_at": "2026-01-02T10:00:00",
     "platform": "discord",
-    "chat_id": "123",
-    "thread_id": "456",
-    "title": "Test Session",
-    "created_at": "2026-01-01T12:00:00Z"
+    "chat_type": "thread",
+    "display_name": "LTM repair thread",
+    "origin": {
+      "platform": "discord",
+      "chat_id": "1511162896762142980",
+      "chat_name": "LTM repair",
+      "chat_type": "thread",
+      "thread_id": "1511162896762142980",
+      "parent_chat_id": "999000111222333444",
+      "guild_id": "555666777888999000"
+    }
+  },
+  "agent:main:discord:channel:123:456": {
+    "session_key": "agent:main:discord:channel:123:456",
+    "session_id": "20260101_120000_bbbbbb",
+    "created_at": "2026-01-01T12:00:00",
+    "updated_at": "2026-01-03T09:00:00",
+    "platform": "discord",
+    "chat_type": "channel",
+    "display_name": "ops-channel",
+    "origin": {
+      "platform": "discord",
+      "chat_id": "123",
+      "chat_name": "ops",
+      "chat_type": "channel",
+      "thread_id": "456",
+      "guild_id": "555666777888999000"
+    }
+  },
+  "agent:main:telegram:dm:777888": {
+    "session_key": "agent:main:telegram:dm:777888",
+    "session_id": "20260101_120000_cccccc",
+    "created_at": "2026-01-01T12:00:00",
+    "updated_at": "2026-01-01T12:30:00",
+    "platform": "telegram",
+    "chat_type": "dm",
+    "display_name": "Zoe DM",
+    "origin": {
+      "platform": "telegram",
+      "chat_id": "777888",
+      "chat_type": "dm",
+      "user_id": "777888",
+      "user_name": "zoe"
+    }
   }
-]
+}
