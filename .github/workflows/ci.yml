@@ -28,17 +28,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install test dependencies
+      - name: Install package (editable, with dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install pytest>=7.0 pytest-timeout
+          python -m pip install -e ".[dev]"
 
-      - name: Package import smoke
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: python -c "import self_wake; print(f'self_wake {self_wake.__version__}')"
+      - name: Import smoke (installed package, no PYTHONPATH)
+        run: |
+          python -c "import self_wake; print(f'self_wake {self_wake.__version__}')"
+          python -c "import self_wake.compat_shim, self_wake.capabilities, self_wake.sessions, self_wake.tools; print('submodules importable')"
 
-      - name: Run tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+      - name: Run tests (installed package path)
         run: python -m pytest -q
