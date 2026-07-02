@@ -1,5 +1,5 @@
 name: self-wake
-version: "1.1.0"
+version: "1.1.1"
 description: Portable operator tools for Hermes internal session wake routing. Bundles a compat shim that provides internal_session_wake_v1 on vanilla Hermes (opt-in).
 provides_tools:
   - self_wake_sessions

@@ -29,7 +29,7 @@ from pathlib import Path
 
 from . import cli, compat_shim, schemas, tools
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 logger = logging.getLogger(__name__)
 
