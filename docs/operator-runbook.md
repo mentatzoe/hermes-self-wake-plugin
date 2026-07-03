@@ -211,7 +211,7 @@ changed shape on this Hermes version.
 **Fix:**
 1. Run `/self-wake doctor` — check `kanban_db` status
 2. Re-subscribe with `--dry-run` and inspect `user_id_marker`
-3. If `visible_only: true`, the host capability is missing; see `capability_missing` fix above
+3. If `visible_only: true`, the row was deliberately created with `--force-degraded-visible-only`; re-subscribe without that flag to enable wakes. (Capability-missing hosts fail closed with `error: capability_missing` and never write visible-only rows.)
 4. If the backend reports `kanban_unavailable`, ensure `hermes_cli.kanban_db` is importable in the Hermes process
 
 ### Doctor reports `kanban_db` fail
@@ -244,11 +244,12 @@ yet populated by the gateway.
 
 To stop a Kanban task from waking a session:
 
-1. Re-subscribe with `force_degraded_visible_only` to downgrade to a visible-only row:
-   ```
-   /self-wake subscribe --task-id t_abc123 --session-key "..." --force-degraded-visible-only
-   ```
-2. Or manually delete the row from `kanban_notify_subs` via the Kanban CLI
-3. Or disable the plugin entirely: `hermes plugins disable self-wake` and restart
+1. Delete the row from `kanban_notify_subs` via the Kanban CLI (or SQL on the
+   board DB). This is the only per-task rollback: **re-subscribing with
+   `--force-degraded-visible-only` does NOT downgrade an existing wake
+   subscription** — the existing `session:`/`session_id:` marker is
+   deliberately preserved (see the marker-preservation regression test), so
+   wakes would keep firing.
+2. Or disable the plugin entirely: `hermes plugins disable self-wake` and restart
 
 Disabling the plugin does not remove core capability or existing subscriptions.

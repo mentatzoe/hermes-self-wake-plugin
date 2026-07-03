@@ -207,7 +207,6 @@ def list_wake_subscriptions(
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
-            cap = caps.probe_wake_capability(hermes_home)
             result = []
             for r in rows:
                 d = dict(r)

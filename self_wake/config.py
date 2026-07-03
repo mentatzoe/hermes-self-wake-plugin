@@ -11,7 +11,7 @@ from typing import Any
 # Configuration keys under self_wake.* in config.yaml
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
-    "compat_shim_enabled": False,  # always False in v1; no shim shipped by default
+    "compat_shim_enabled": False,  # opt-in; the shim never installs unless enabled
     "max_session_results": 20,
     "receipt_preview_max_chars": 200,
 }

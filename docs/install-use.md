@@ -55,12 +55,14 @@ See `docs/compatibility.md` for the full version story.
 ## 2. Install the plugin
 
 ```bash
-hermes plugins install git@github.com:mentatzoe/hermes-self-wake-plugin.git --enable
+hermes plugins install https://github.com/mentatzoe/hermes-self-wake-plugin.git --enable
 ```
 
 This clones the repo into `~/.hermes/plugins/self-wake/` and registers it.
 
 ## 3. Enable the plugin
+
+`--enable` in step 2 already enabled it. If you installed without the flag:
 
 ```bash
 hermes plugins enable self-wake

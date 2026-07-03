@@ -20,7 +20,7 @@ A clean, host-owned primitive ensures:
 
 ## Changes
 
-(TODO: fill in with actual diff summary)
+adds `GatewayRunner.wake_session` with the v1 keyword contract, the `session_wake_receipts` table with receipt-write methods, session-store lookup, and Kanban notifier wake routing (see `0001-internal-session-wake-v1.patch` for the full diff)
 
 ## Checklist
 

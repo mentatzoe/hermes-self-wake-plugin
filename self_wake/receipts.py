@@ -2,7 +2,7 @@
 
 Reads ``session_wake_receipts`` from ``$HERMES_HOME/state.db`` with graceful
 degradation when the table (or the whole capability) is absent. The receipts
-table is created by the host core patch; on vanilla Hermes it does not exist,
+table is created by the host wake capability (native or compat shim); on vanilla Hermes it does not exist,
 so queries return a structured ``capability_missing`` response rather than a
 raw SQL exception.
 
@@ -89,8 +89,8 @@ def query_receipts(
             "count": 0,
             "remediation": (
                 "state.db does not exist. The self-wake receipt table is created "
-                "by the Hermes internal_session_wake_v1 core patch. Apply the "
-                "patch from docs/core-patch/ or upgrade Hermes."
+                "by the internal_session_wake_v1 capability. Enable the compat shim "
+                "(self_wake.compat_shim_enabled: true) or apply docs/core-patch/."
             ),
         }
     if not _receipt_table_exists(db):
@@ -103,7 +103,7 @@ def query_receipts(
             "count": 0,
             "remediation": (
                 "The session_wake_receipts table is created by the Hermes "
-                "internal_session_wake_v1 core patch, which is not present on "
+                "internal_session_wake_v1 capability, which is not present on "
                 "this host. Apply the patch from docs/core-patch/ or upgrade "
                 "Hermes. Without it, no wake receipts are ever recorded."
             ),

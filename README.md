@@ -20,7 +20,7 @@ operator explicitly chooses the optional reference core patch.
 
 `self_wake_sessions` exposes a host-session resolver, not a public dependency on
 Hermes' current cache file. Current Hermes does not yet expose a stable plugin
-resolver API, so this PR includes a read-only **current-Hermes adapter** over the
+resolver API, so this plugin includes a read-only **current-Hermes adapter** over the
 gateway current-session cache (`$HERMES_HOME/sessions/sessions.json`) plus
 `state.db` metadata. That cache is active gateway routing state, not a canonical
 history ledger and not the plugin contract. If Hermes later exposes a native

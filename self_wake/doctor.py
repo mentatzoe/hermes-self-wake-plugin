@@ -44,7 +44,7 @@ def _cron_wake_config() -> tuple[Optional[bool], str]:
 # was never applied" from "the receipt table is absent" — three failure modes
 # that previously all looked like an undifferentiated ``core capability
 # missing`` and would lead an operator to re-apply the patch when the real
-# issue was a module-path change on upgrade (see review finding M2).
+# issue was a module-path change on upgrade.
 CAP_FAIL_IMPORT_CHANGED = "import_changed"
 CAP_FAIL_ATTRIBUTE_MISSING = "attribute_missing"
 CAP_FAIL_RECEIPT_TABLE_ABSENT = "receipt_table_absent"
@@ -255,13 +255,13 @@ def run_diagnostics(
         checks.append(_check(
             "receipt_table", "fail" if cap["mode"] == "unsupported" else "warn",
             "session_wake_receipts table absent",
-            "Created by the internal_session_wake_v1 core patch.",
+            "Created by the internal_session_wake_v1 capability (native or shim).",
         ))
         if cap["mode"] != "full":
             # The capability-failure remediation already covers the root cause
             # (import_changed vs attribute_missing vs receipt_table_absent);
             # keep this note table-specific so it never contradicts that
-            # categorization (review finding M2).
+            # categorization.
             remediation.append(
                 "Receipt table absent — created by the internal_session_wake_v1 "
                 "core patch; see the core_capability remediation for the "
@@ -271,7 +271,7 @@ def run_diagnostics(
     # 4. Kanban DB reachable + existing wake subscriptions
     # Resolve the backend explicitly so a missing/unreachable Kanban DB is
     # reported as a failure rather than masked by list_wake_subscriptions
-    # swallowing all errors and returning [] (review finding H1: the old
+    # swallowing all errors and returning [] (the old
     # ``subs or True`` check could never report "fail").
     kb_backend, kb_err = (
         (backend, None) if backend is not None

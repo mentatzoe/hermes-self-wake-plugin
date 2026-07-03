@@ -9,7 +9,7 @@ The plugin is **portable and shareable**: it does not require operators to patch
 Hermes core. The wake capability can be provided by the bundled compat shim
 (runtime monkeypatch, opt-in) or by a native upstream/patched capability.
 
-Two deliverables live in this repo:
+These deliverables live in this repo:
 
 1. **The formal plugin** — installed/managed as a Hermes plugin. Never edits
    core files. Provides tools, slash command, hook, and bundled skill.
@@ -92,7 +92,7 @@ When the shim is enabled but drift is detected:
 
 ## Security
 
-- Same-profile wake only (cross-profile disabled by default)
+- Kanban notifier routing filters subscriptions by owning profile by default (`--notifier-profile` overrides); `wake_session` itself is not profile-gated
 - Receipts store bounded preview + hash, not full payloads
 - Logs include target/receipt identifiers, not full payloads/secrets
 - The shim monkeypatches only the four documented classes; it does not touch
