@@ -11,9 +11,11 @@ be provided three ways:
    shareable path: no core patch required.** The shim is the recommended way to
    share the plugin across Hermes installs and upgrades.
 2. **Native** (`source: "native"`) — the host has the capability as real
-   code: today, because the operator applied the reference core patch
-   (upstream Hermes does not currently ship it), or
-   the operator applies the optional reference patch under `docs/core-patch/`.
+   code in core. The probe cannot tell (and does not try to tell) how it got
+   there: today that means the operator applied the reference patch under
+   `docs/core-patch/`; if Nous Research ever ships the capability upstream,
+   that reads as "native" too, and the patch retires. Upstream Hermes does
+   not currently ship it.
 3. **Absent** (`source: "absent"`) — neither present. The plugin runs in
    `inspect_only` mode and fails closed for wake-mutating operations.
 
