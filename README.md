@@ -1,5 +1,8 @@
 # hermes-self-wake-plugin
 
+[![CI](https://github.com/mentatzoe/hermes-self-wake-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/mentatzoe/hermes-self-wake-plugin/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Portable operator tools for Hermes internal session wake routing.**
 
 This plugin provides tools for discovering sessions, managing Kanban wake
@@ -11,10 +14,34 @@ on vanilla Hermes when enabled.
 
 ## Status
 
-**Implemented (v1.1)** — plugin logic + a bundled compat shim that provides
-``internal_session_wake_v1`` on vanilla Hermes at runtime (opt-in). 127 tests
-pass against a temp `HERMES_HOME`. No Hermes core files are touched unless the
-operator explicitly chooses the optional reference core patch.
+Implemented and released — see the
+[releases page](https://github.com/mentatzoe/hermes-self-wake-plugin/releases)
+for the changelog. The full test suite runs in CI on Python 3.10–3.13 against
+a temp `HERMES_HOME`, including the real plugin-loader path and end-to-end
+wake-dispatch tests. No Hermes core files are touched unless the operator
+explicitly chooses the optional reference core patch.
+
+## Guarantees (fail-closed by design)
+
+- **No subscription that cannot fire.** The delivery platform is resolved from
+  the target session's cached origin or its session key — never guessed. When
+  neither yields one, subscribing fails with `platform_required`; targets not
+  found in the session cache are flagged (`resolved_from_cache: false`) with a
+  warning.
+- **Every wake attempt writes a receipt.** "Did it actually wake, and did the
+  agent respond?" is a query (`self_wake_receipts`), not a feeling.
+- **No double injection.** A wake whose post-dispatch bookkeeping fails is
+  recorded as `dispatched_unconfirmed` and never retried; concurrent wakes
+  sharing a dedupe key cannot both dispatch.
+- **The shim refuses rather than degrades.** Before installing, it verifies
+  every host internal the vendored code touches; on drift it refuses with a
+  structured reason instead of failing open. On partial-native hosts it fills
+  only the missing methods and reports what it skipped
+  (`skipped_native_methods`) — native implementations are never overwritten.
+- **Downgrades that cannot happen say so.** Re-subscribing a wake row with the
+  visible-only flag preserves the wake marker by design; the response says
+  `downgrade_ignored` and warns that wakes keep firing, instead of implying
+  they stopped.
 
 ## Session discovery boundary
 
@@ -36,8 +63,10 @@ be provided three ways, **in preference order**:
    `self_wake.compat_shim_enabled: true` in `config.yaml`. The plugin installs
    `wake_session`, the receipt methods, session lookup, the receipts table, and
    Kanban notifier routing at runtime via class-level monkeypatching. **No core
-   patch required.** The shim fails closed on internal drift and defers to a
-   native capability when present. See `docs/compatibility.md`.
+   patch required.** The shim fails closed on internal drift, defers to a
+   native capability when present, and on partial-native hosts fills only the
+   missing methods (never overwriting native ones). See
+   `docs/compatibility.md`.
 2. **Native (upstream or optional core patch)** — upstream Hermes ships the
    capability, or the operator applies the optional reference patch under
    `docs/core-patch/`. No monkeypatching. The shim auto-detects this and does
@@ -62,10 +91,10 @@ See `docs/operator-runbook.md` for the full operational guide.
 ## Install
 
 ```bash
-# 1. Install from the repo
-hermes plugins install <repo-url> --enable
+# 1. Install from the repo (--enable also enables it)
+hermes plugins install https://github.com/mentatzoe/hermes-self-wake-plugin.git --enable
 
-# 2. Enable the plugin
+# 2. (Only if you installed without --enable)
 hermes plugins enable self-wake
 
 # 3. Add the toolset to your platform toolsets in ~/.hermes/config.yaml:
