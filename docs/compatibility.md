@@ -10,7 +10,9 @@ be provided three ways:
    in (`self_wake.compat_shim_enabled: true`). **This is the portable,
    shareable path: no core patch required.** The shim is the recommended way to
    share the plugin across Hermes installs and upgrades.
-2. **Native** (`source: "native"`) — upstream Hermes ships the capability, or
+2. **Native** (`source: "native"`) — the host has the capability as real
+   code: today, because the operator applied the reference core patch
+   (upstream Hermes does not currently ship it), or
    the operator applies the optional reference patch under `docs/core-patch/`.
 3. **Absent** (`source: "absent"`) — neither present. The plugin runs in
    `inspect_only` mode and fails closed for wake-mutating operations.

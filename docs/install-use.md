@@ -28,7 +28,8 @@ self_wake:
 The shim fails closed if Hermes internals drift and defers to a native
 capability when present. For Kanban wake subscriptions its behavior matches
 the core patch. **It does not provide cron-delivery or cross-session message
-wakes — those need the native capability (Option B) or upstream Hermes** —
+wakes — those need the core patch (Option B; upstream Hermes does not
+currently ship the capability)** —
 and active-session handling follows vanilla busy semantics. The capability
 matrix in `docs/compatibility.md` is canonical.
 

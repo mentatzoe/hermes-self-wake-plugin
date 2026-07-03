@@ -74,10 +74,12 @@ the same thing:
   capability): the shim is the low-friction option because it patches
   nothing on disk; the core patch is the full-capability option.
 
-1. **Native** — upstream Hermes ships the capability, or the operator applies
-   the reference patch under `docs/core-patch/`. No monkeypatching. This is
-   the full wake surface: Kanban, cron-delivery, and cross-session message
-   wakes, plus native active-session queueing.
+1. **Native** — the capability exists as real code in the host. Today that
+   means the operator applied the reference patch under `docs/core-patch/`
+   (upstream Hermes does not ship it — if it ever does, this becomes the
+   default and the patch retires). No monkeypatching. This is the full wake
+   surface: Kanban, cron-delivery, and cross-session message wakes, plus
+   native active-session queueing.
 2. **Compat shim** — set `self_wake.compat_shim_enabled: true` in
    `config.yaml`. No core patch; survives Hermes upgrades; installs at
    runtime via class-level monkeypatching with drift checks that refuse to
