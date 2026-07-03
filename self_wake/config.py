@@ -10,9 +10,7 @@ from typing import Any
 
 # Configuration keys under self_wake.* in config.yaml
 DEFAULTS: dict[str, Any] = {
-    "enabled": True,
     "compat_shim_enabled": False,  # opt-in; the shim never installs unless enabled
-    "max_session_results": 20,
     "receipt_preview_max_chars": 200,
 }
 
@@ -46,13 +44,15 @@ def get_config(key: str | None = None) -> Any:
     return merged.get(key)
 
 
-def get_int(key: str, default: int) -> int:
-    """Typed int getter with fallback."""
+def get_int(key: str, default: int, minimum: int = 0) -> int:
+    """Typed int getter with fallback; values below ``minimum`` fall back too
+    (a negative preview length would slice from the wrong end)."""
     val = get_config(key)
     try:
-        return int(val)  # type: ignore[arg-type]
+        parsed = int(val)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+    return parsed if parsed >= minimum else default
 
 
 def get_bool(key: str, default: bool) -> bool:
@@ -60,6 +60,8 @@ def get_bool(key: str, default: bool) -> bool:
     val = get_config(key)
     if isinstance(val, bool):
         return val
+    if isinstance(val, int):
+        return bool(val)  # YAML `key: 1` means enabled, same as the nested form
     if isinstance(val, str):
         return val.strip().lower() in ("1", "true", "yes", "on")
     return default

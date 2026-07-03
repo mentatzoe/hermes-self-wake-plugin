@@ -12,7 +12,7 @@ on vanilla Hermes when enabled.
 ## Status
 
 **Implemented (v1.1)** — plugin logic + a bundled compat shim that provides
-``internal_session_wake_v1`` on vanilla Hermes at runtime (opt-in). 112 tests
+``internal_session_wake_v1`` on vanilla Hermes at runtime (opt-in). 120 tests
 pass against a temp `HERMES_HOME`. No Hermes core files are touched unless the
 operator explicitly chooses the optional reference core patch.
 

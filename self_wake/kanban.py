@@ -161,14 +161,32 @@ def _fetch_notify_row(conn: sqlite3.Connection, task_id: str, platform: str,
     return dict(row) if row else None
 
 
+def _platform_from_session_key(session_key: str) -> str:
+    """Best-effort platform from an ``agent:<profile>:<platform>:...`` key."""
+    parts = (session_key or "").split(":")
+    if len(parts) >= 3 and parts[0] == "agent":
+        return parts[2].strip().lower()
+    return ""
+
+
 def _reset_notify_cursor(conn: sqlite3.Connection, task_id: str, platform: str,
                          chat_id: str, thread_id: str) -> int:
-    """Set last_event_id=0 for a notify sub row. Returns rows affected."""
+    """Set last_event_id=0 for a notify sub row. Returns rows affected.
+
+    Commits explicitly: the production kanban_db connection is autocommit,
+    but the KanbanBackend protocol does not require it, and without a commit
+    a transactional backend rolls this back on close while the tool reports
+    success (the "self-certified discarded write" failure).
+    """
     cur = conn.execute(
         "UPDATE kanban_notify_subs SET last_event_id = 0 "
         "WHERE task_id=? AND platform=? AND chat_id=? AND thread_id=?",
         (task_id, platform, chat_id, thread_id or ""),
     )
+    try:
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # autocommit connections have no active transaction
     return cur.rowcount or 0
 
 
@@ -271,7 +289,23 @@ def create_wake_subscription(
     resolved_session_id = (entry.get("session_id") or target_session_id or "").strip()
 
     origin = entry.get("origin") or {}
-    platform = str(platform or entry.get("platform") or origin.get("platform") or "discord").strip().lower()
+    resolved_from_cache = bool(origin or entry.get("platform"))
+    platform = str(platform or entry.get("platform") or origin.get("platform") or "").strip().lower()
+    if not platform:
+        # A wrong platform writes a row no adapter will ever collect: the
+        # "looks subscribed but will never fire" state. Never guess.
+        platform = _platform_from_session_key(
+            str(target_session_key or entry.get("session_key") or ""))
+    if not platform:
+        return {
+            "success": False,
+            "error": "platform_required",
+            "capability_mode": cap["mode"],
+            "remediation": "the target session is not in the current-session "
+                           "cache and no platform could be derived from the "
+                           "session key; pass platform explicitly so the "
+                           "notifier can route the wake.",
+        }
     chat_id = str(chat_id or origin.get("chat_id") or "").strip()
     thread_id = str(thread_id or origin.get("thread_id") or "").strip()
 
@@ -361,9 +395,17 @@ def create_wake_subscription(
                 if reset_cursor:
                     reset_applied = _reset_notify_cursor(
                         conn, task_id, platform, chat_id, thread_id) > 0
-                after = _fetch_notify_row(conn, task_id, platform, chat_id, thread_id)
+                try:
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass
             finally:
                 kanban_backend.close(conn)
+            verify_conn = kanban_backend.connect(board=board)
+            try:
+                after = _fetch_notify_row(verify_conn, task_id, platform, chat_id, thread_id)
+            finally:
+                kanban_backend.close(verify_conn)
         except Exception as exc:  # noqa: BLE001
             return {
                 "success": False,
@@ -396,12 +438,24 @@ def create_wake_subscription(
         "visible_only": visible_only,
         "before": before,
         "after": after,
+        "resolved_from_cache": resolved_from_cache,
+        "downgrade_ignored": bool(visible_only and internal_wake_enabled and not dry_run),
         "verification": {
             "internal_wake_enabled": internal_wake_enabled,
             "warning": (
-                "visible-only subscription: agent will NOT be woken; this row "
-                "only sends a platform notification."
-            ) if visible_only else None,
+                (
+                    "downgrade ignored: the existing wake marker was preserved "
+                    "(markers are never downgraded); wakes will KEEP FIRING. "
+                    "Delete the row to stop wakes."
+                ) if (visible_only and internal_wake_enabled and not dry_run) else (
+                    "visible-only subscription: agent will NOT be woken; this row "
+                    "only sends a platform notification."
+                ) if visible_only else (
+                    "target session was not found in the current-session cache; "
+                    "the marker was written as given. Verify session key and "
+                    "platform, then watch receipts for the first wake."
+                ) if not resolved_from_cache else None
+            ),
             "check_receipts_with": {
                 "target_session_key": resolved_key or None,
                 "target_session_id": resolved_session_id or None,

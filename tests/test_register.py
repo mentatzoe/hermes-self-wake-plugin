@@ -82,4 +82,4 @@ def test_register_hooks_returns_none(hermes_home):
 
 
 def test_version_is_set():
-    assert __version__ == "1.1.1"
+    assert __version__ == "1.2.0"

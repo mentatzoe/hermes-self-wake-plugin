@@ -151,6 +151,12 @@ def _shim_status() -> dict:
         }
     if reason == "drift_detected":
         drift = report.get("drift", {})
+        if "notifier already routes wake markers" in str(drift.get("reason", "")):
+            return _check(
+                "compat_shim", "info",
+                "shim not installed: the host notifier already routes wake "
+                "markers (native or patched); nothing to shim.",
+            )
         return {
             "status": "fail",
             "detail": (
@@ -288,6 +294,21 @@ def run_diagnostics(
         wake_subs: list[dict[str, Any]] = []
         visible_subs: list[dict[str, Any]] = []
     else:
+        try:
+            probe_conn = kb_backend.connect()
+            kb_backend.close(probe_conn)
+        except Exception as exc:  # noqa: BLE001
+            checks.append(_check(
+                "kanban_db", "fail",
+                f"kanban board DB unreachable: {exc}",
+                "Check that the board DB exists and is readable; "
+                "list_wake_subscriptions treats unreachable as empty.",
+            ))
+            kb_backend = None
+            subs = []
+            wake_subs = []
+            visible_subs = []
+    if kb_backend is not None:
         subs = kanban_mod.list_wake_subscriptions(backend=kb_backend, hermes_home=hermes_home)
         wake_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) in ("session", "session_id")]
         visible_subs = [s for s in subs if kanban_mod._classify_marker(s.get("user_id")) == "visible_only"]

@@ -146,8 +146,13 @@ Receipt statuses:
 - `dispatched` — event handed to adapter pipeline
 - `queued` — target session already active; event queued as follow-up
 - `agent_responded` — a response was observed
-- `failure` — dispatch/wake failed
-- `deduped` — existing receipt reused for dedupe key
+- `dispatched_unconfirmed` — the wake WAS injected but post-dispatch
+  bookkeeping failed (e.g. the session task errored while awaited); not
+  retried, because retrying would inject the payload again
+- `failure` — dispatch/wake failed before injection; retryable
+- `deduped` — existing receipt reused for dedupe key (in-flight `requested`
+  receipts younger than 2 minutes are not retried, so concurrent wakes with
+  one dedupe key cannot double-dispatch)
 
 Receipt payload previews are truncated to 200 characters by default. Full payloads are not echoed.
 

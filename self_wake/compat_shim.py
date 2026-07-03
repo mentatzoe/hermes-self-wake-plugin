@@ -95,7 +95,13 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time as _time
 from typing import Any, Callable, Optional
+
+# A "requested" receipt younger than this is treated as in-flight and not
+# retried (two concurrent wakes with one dedupe key must not both dispatch);
+# older than this it is treated as a crashed pre-dispatch attempt.
+_INFLIGHT_RETRY_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
 
@@ -416,7 +422,14 @@ async def _shim_wake_session(
     )
     if not created:
         existing_status = str(receipt.get("status") or "")
-        if existing_status not in {"failure", "requested"}:
+        retryable = existing_status == "failure"
+        if existing_status == "requested":
+            ts = receipt.get("updated_at") or receipt.get("requested_at") or 0
+            try:
+                retryable = (_time.time() - float(ts)) > _INFLIGHT_RETRY_SECONDS
+            except (TypeError, ValueError):
+                retryable = False
+        if not retryable:
             return {
                 "status": "deduped",
                 "receipt_id": receipt.get("id"),
@@ -494,6 +507,17 @@ async def _shim_wake_session(
     try:
         session_db.update_session_wake_receipt(receipt_id, status="dispatched", dispatched=True)
         await adapter.handle_message(event)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        row = session_db.update_session_wake_receipt(receipt_id, status="failure", error=error)
+        logger.warning("internal wake failed for %s: %s", entry.session_key, error)
+        return {"status": "failure", "error": error, "receipt_id": receipt_id, "receipt": row}
+
+    # The payload IS injected past this point. Anything that fails below is
+    # bookkeeping, not delivery: mark it dispatched_unconfirmed (non-retryable)
+    # instead of failure, so the notifier does not rewind and re-inject a wake
+    # that already happened.
+    try:
         if target_already_active:
             row = session_db.update_session_wake_receipt(
                 receipt_id, status="queued", dispatched=True
@@ -536,9 +560,16 @@ async def _shim_wake_session(
         }
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        row = session_db.update_session_wake_receipt(receipt_id, status="failure", error=error)
-        logger.warning("internal wake failed for %s: %s", entry.session_key, error)
-        return {"status": "failure", "error": error, "receipt_id": receipt_id, "receipt": row}
+        row = None
+        try:
+            row = session_db.update_session_wake_receipt(
+                receipt_id, status="dispatched_unconfirmed", error=error)
+        except Exception:  # noqa: BLE001
+            logger.warning("could not record dispatched_unconfirmed for receipt %s", receipt_id)
+        logger.warning("internal wake dispatched but bookkeeping failed for %s: %s",
+                       entry.session_key, error)
+        return {"status": "dispatched_unconfirmed", "error": error,
+                "receipt_id": receipt_id, "receipt": row}
 
 
 def _shim_kanban_internal_wake_target(self, sub: dict):
@@ -902,6 +933,48 @@ def _drift_check() -> dict:
                           "(expected 'await adapter.send(sub[\"chat_id\"], msg, metadata=metadata)')")
             targets["kanban_notifier"] = {"ok": ok, "reason": reason, "already_patched": already_routed}
 
+    # --- Extended anchors: every other host internal the vendored code calls.
+    # The four structural anchors above catch shape drift at the patch sites;
+    # these catch renames/removals that would otherwise fail OPEN inside the
+    # notifier tick's blanket exception handler (silent no-wake).
+    ext_missing: list[str] = []
+    try:
+        from gateway.kanban_watchers import GatewayKanbanWatchersMixin as _M  # type: ignore
+        for _name in ("_kanban_advance", "_kanban_rewind", "_kanban_unsub",
+                      "_deliver_kanban_artifacts"):
+            if not callable(getattr(_M, _name, None)):
+                ext_missing.append(f"GatewayKanbanWatchersMixin.{_name}")
+    except Exception:
+        pass  # already reported by the kanban_notifier anchor
+    try:
+        import hermes_cli.kanban_db as _kdb  # type: ignore
+        for _name in ("list_boards", "read_board_metadata", "connect",
+                      "list_notify_subs", "claim_unseen_events_for_sub",
+                      "get_task", "kanban_db_path", "DEFAULT_BOARD"):
+            if not hasattr(_kdb, _name):
+                ext_missing.append(f"hermes_cli.kanban_db.{_name}")
+    except Exception as exc:
+        ext_missing.append(f"hermes_cli.kanban_db not importable: {exc}")
+    try:
+        import dataclasses as _dc
+        from gateway.platforms.base import MessageEvent as _ME, MessageType as _MT  # type: ignore # noqa: F401
+        if "internal" not in {f.name for f in _dc.fields(_ME)}:
+            ext_missing.append("MessageEvent has no 'internal' field")
+    except Exception as exc:
+        ext_missing.append(f"gateway.platforms.base MessageEvent/MessageType: {exc}")
+    try:
+        from gateway.session import build_session_key as _bsk  # type: ignore
+        _params = set(inspect.signature(_bsk).parameters)
+        for _kw in ("group_sessions_per_user", "thread_sessions_per_user"):
+            if _kw not in _params:
+                ext_missing.append(f"build_session_key missing kwarg {_kw}")
+    except Exception as exc:
+        ext_missing.append(f"gateway.session.build_session_key: {exc}")
+    targets["extended_anchors"] = {
+        "ok": not ext_missing,
+        "reason": "; ".join(ext_missing[:4]),
+    }
+
     ok = all(t.get("ok") for t in targets.values()) if targets else False
     reason = ""
     if not ok:
@@ -960,15 +1033,19 @@ def install_shim(
         _install_report = report
         return report
 
-    # 1. Native preference: if the host already has wake_session, do not install.
+    # 1. Native preference: if the host already ships the wake methods, do not
+    # install. Gate on method presence, NOT the full probe: the full probe also
+    # requires the receipts table and notifier routing, so on a fresh native
+    # host (no state.db yet) it reports unavailable and the shim would try to
+    # clobber native methods with vendored copies.
     if not force:
         from . import capabilities as caps
-        cap = caps.probe_wake_capability(hermes_home)
-        if cap.get("available"):
-            report = {"installed": False, "reason": "native_capability_present",
-                      "mode": cap.get("mode")}
+        native_wake = bool(caps._probe_gateway_wake_session().get("available"))
+        native_receipts = bool(caps._probe_session_db_receipt_methods().get("available"))
+        if native_wake and native_receipts:
+            report = {"installed": False, "reason": "native_capability_present"}
             _install_report = report
-            logger.info("self-wake shim: native capability present; not installing")
+            logger.info("self-wake shim: native wake methods present; not installing")
             return report
 
     # 2. Config gate: opt-in only.
@@ -998,40 +1075,34 @@ def install_shim(
             "kanban_mixin": _resolve("gateway.kanban_watchers", "GatewayKanbanWatchersMixin"),
         }
 
-    # 4. Install: save originals, assign shim methods to classes.
+    # 4. Install: save originals, assign shim methods to classes. A method the
+    # host already provides is NEVER overwritten (partial-native hosts keep
+    # their native implementations, which may carry upstream fixes); only the
+    # notifier pair is always replaced — routing wake markers is the point,
+    # and the drift check has already refused if the native watcher routes.
     originals: list[tuple[Any, str, Any]] = []
+    skipped_native: list[str] = []
     SessionStore = targets["session_store"]
     SessionDB = targets["session_db"]
     GatewayRunner = targets["gateway_runner"]
     Mixin = targets["kanban_mixin"]
 
-    originals.append((SessionStore, "lookup_by_session_key",
-                      getattr(SessionStore, "lookup_by_session_key", None)))
-    SessionStore.lookup_by_session_key = _shim_lookup_by_session_key  # type: ignore
+    def _assign(cls: Any, name: str, fn: Any, always: bool = False) -> None:
+        existing = getattr(cls, name, None)
+        if existing is not None and not always:
+            skipped_native.append(f"{cls.__name__}.{name}")
+            return
+        originals.append((cls, name, existing))
+        setattr(cls, name, fn)
 
-    originals.append((SessionDB, "create_session_wake_receipt",
-                      getattr(SessionDB, "create_session_wake_receipt", None)))
-    originals.append((SessionDB, "update_session_wake_receipt",
-                      getattr(SessionDB, "update_session_wake_receipt", None)))
-    SessionDB.create_session_wake_receipt = _shim_create_session_wake_receipt  # type: ignore
-    SessionDB.update_session_wake_receipt = _shim_update_session_wake_receipt  # type: ignore
-
-    originals.append((GatewayRunner, "wake_session",
-                      getattr(GatewayRunner, "wake_session", None)))
-    originals.append((GatewayRunner, "_lookup_session_entry_for_wake",
-                      getattr(GatewayRunner, "_lookup_session_entry_for_wake", None)))
-    originals.append((GatewayRunner, "_wake_message_ids_after",
-                      getattr(GatewayRunner, "_wake_message_ids_after", None)))
-    GatewayRunner.wake_session = _shim_wake_session  # type: ignore
-    GatewayRunner._lookup_session_entry_for_wake = _shim_lookup_session_entry_for_wake  # type: ignore
-    GatewayRunner._wake_message_ids_after = _shim_wake_message_ids_after  # type: ignore
-
-    originals.append((Mixin, "_kanban_internal_wake_target",
-                      getattr(Mixin, "_kanban_internal_wake_target", None)))
-    originals.append((Mixin, "_kanban_notifier_watcher",
-                      getattr(Mixin, "_kanban_notifier_watcher", None)))
-    Mixin._kanban_internal_wake_target = _shim_kanban_internal_wake_target  # type: ignore
-    Mixin._kanban_notifier_watcher = _shim_kanban_notifier_watcher  # type: ignore
+    _assign(SessionStore, "lookup_by_session_key", _shim_lookup_by_session_key)
+    _assign(SessionDB, "create_session_wake_receipt", _shim_create_session_wake_receipt)
+    _assign(SessionDB, "update_session_wake_receipt", _shim_update_session_wake_receipt)
+    _assign(GatewayRunner, "wake_session", _shim_wake_session)
+    _assign(GatewayRunner, "_lookup_session_entry_for_wake", _shim_lookup_session_entry_for_wake)
+    _assign(GatewayRunner, "_wake_message_ids_after", _shim_wake_message_ids_after)
+    _assign(Mixin, "_kanban_internal_wake_target", _shim_kanban_internal_wake_target, always=True)
+    _assign(Mixin, "_kanban_notifier_watcher", _shim_kanban_notifier_watcher, always=True)
 
     global _originals
     _originals = originals
@@ -1047,6 +1118,7 @@ def install_shim(
 
     report = {
         "installed": True,
+        "skipped_native_methods": skipped_native,
         "reason": "shim_installed",
         "targets": {
             "session_store.lookup_by_session_key": True,

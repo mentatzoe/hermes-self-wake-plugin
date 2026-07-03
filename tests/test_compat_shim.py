@@ -104,8 +104,21 @@ class _FakeGatewayRunner:
 
 class _FakeKanbanMixin:
     """Vanilla GatewayKanbanWatchersMixin shape: _kanban_notifier_watcher calls
-    adapter.send directly with the vanilla send pattern, and does NOT have
+    adapter.send directly with the vanilla send pattern, has the vanilla
+    helper methods the vendored watcher delegates to, and does NOT have
     _kanban_internal_wake_target."""
+
+    def _kanban_advance(self, *a, **k):
+        return None
+
+    def _kanban_rewind(self, *a, **k):
+        return None
+
+    def _kanban_unsub(self, *a, **k):
+        return None
+
+    async def _deliver_kanban_artifacts(self, *a, **k):
+        return None
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         # Vanilla send site — the exact pattern the drift check anchors on.
@@ -164,6 +177,13 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
     fake_session_mod = types.ModuleType("gateway.session")
     fake_session_mod.SessionStore = session_store  # type: ignore[attr-defined]
 
+    def _fake_build_session_key(*, platform="", chat_id="", thread_id=None,
+                                user_id=None, group_sessions_per_user=False,
+                                thread_sessions_per_user=False, **kwargs):
+        return f"agent:main:{platform}:{chat_id}:{thread_id or ''}"
+
+    fake_session_mod.build_session_key = _fake_build_session_key  # type: ignore[attr-defined]
+
     fake_run_mod = types.ModuleType("gateway.run")
     fake_run_mod.GatewayRunner = gateway_runner  # type: ignore[attr-defined]
 
@@ -173,16 +193,51 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
     fake_state_mod = types.ModuleType("hermes_state")
     fake_state_mod.SessionDB = session_db  # type: ignore[attr-defined]
 
+    # Platform event types the vendored watcher constructs.
+    import dataclasses as _dc
+    import enum as _enum
+
+    fake_base_mod = types.ModuleType("gateway.platforms.base")
+
+    @_dc.dataclass
+    class _FakeMessageEvent:
+        text: str = ""
+        internal: bool = False
+        metadata: dict = _dc.field(default_factory=dict)
+
+    class _FakeMessageType(_enum.Enum):
+        TEXT = "text"
+
+    fake_base_mod.MessageEvent = _FakeMessageEvent  # type: ignore[attr-defined]
+    fake_base_mod.MessageType = _FakeMessageType  # type: ignore[attr-defined]
+    fake_platforms_pkg = types.ModuleType("gateway.platforms")
+    fake_platforms_pkg.base = fake_base_mod  # type: ignore[attr-defined]
+
+    # Kanban DB module surface the vendored watcher calls.
+    fake_kdb_mod = types.ModuleType("hermes_cli.kanban_db")
+    for _name in ("list_boards", "read_board_metadata", "connect",
+                  "list_notify_subs", "claim_unseen_events_for_sub",
+                  "get_task", "kanban_db_path"):
+        setattr(fake_kdb_mod, _name, lambda *a, **k: None)
+    fake_kdb_mod.DEFAULT_BOARD = "default"  # type: ignore[attr-defined]
+    fake_hermes_cli_pkg = types.ModuleType("hermes_cli")
+    fake_hermes_cli_pkg.kanban_db = fake_kdb_mod  # type: ignore[attr-defined]
+
     fake_gateway_pkg = types.ModuleType("gateway")
     fake_gateway_pkg.run = fake_run_mod  # type: ignore[attr-defined]
     fake_gateway_pkg.session = fake_session_mod  # type: ignore[attr-defined]
     fake_gateway_pkg.kanban_watchers = fake_kw_mod  # type: ignore[attr-defined]
+    fake_gateway_pkg.platforms = fake_platforms_pkg  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "gateway", fake_gateway_pkg)
     monkeypatch.setitem(sys.modules, "gateway.session", fake_session_mod)
     monkeypatch.setitem(sys.modules, "gateway.run", fake_run_mod)
     monkeypatch.setitem(sys.modules, "gateway.kanban_watchers", fake_kw_mod)
     monkeypatch.setitem(sys.modules, "hermes_state", fake_state_mod)
+    monkeypatch.setitem(sys.modules, "gateway.platforms", fake_platforms_pkg)
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", fake_base_mod)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kdb_mod)
     return {
         "session_store": session_store,
         "session_db": session_db,
@@ -244,10 +299,13 @@ def test_shim_prefers_native_capability(hermes_home, monkeypatch):
     """When the native capability is present, the shim does not install — even
     if config is enabled."""
     monkeypatch.setattr(shim, "_shim_config_enabled", lambda: True)
-    # Simulate a native (already-patched) host: probe returns available.
-    monkeypatch.setattr(caps, "probe_wake_capability",
-                        lambda hh=None: {"available": True, "version": 1, "mode": "full",
-                                         "source": "native", "details": []})
+    # Simulate a native host: the wake methods exist. The gate checks method
+    # presence, not the full probe, so a fresh native host without state.db
+    # still refuses the shim instead of clobbering native methods.
+    monkeypatch.setattr(caps, "_probe_gateway_wake_session",
+                        lambda: {"available": True})
+    monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
+                        lambda: {"available": True})
     report = shim.install_shim()
     assert report["installed"] is False
     assert report["reason"] == "native_capability_present"

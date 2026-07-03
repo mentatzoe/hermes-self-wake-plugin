@@ -99,6 +99,12 @@ matches what it expects (`_drift_check` in `self_wake/compat_shim.py`):
 - `SessionDB` has `_execute_write` and `get_messages`.
 - `GatewayRunner.__init__` references `session_store`, `_session_db`, `adapters`.
 - `_kanban_notifier_watcher` source contains the vanilla send pattern (`await adapter.send(` + `sub["chat_id"], msg, metadata=metadata`) and does NOT already route wake markers.
+- Extended anchors: every other host internal the vendored code calls is
+  presence-checked — the mixin helpers (`_kanban_advance`, `_kanban_rewind`,
+  `_kanban_unsub`, `_deliver_kanban_artifacts`), the `hermes_cli.kanban_db`
+  function surface, `MessageEvent`'s `internal` field and `MessageType`, and
+  `build_session_key`'s per-user session kwargs. A rename of any of these
+  refuses install instead of failing open inside the notifier tick.
 
 If any target has drifted (renamed, refactored, signature changed), the shim
 **refuses to install** and returns a structured error naming the drifted
@@ -183,6 +189,12 @@ The plugin is shareable to another operator on vanilla Hermes by:
 1. `hermes plugins install <repo> --enable`
 2. `self_wake.compat_shim_enabled: true` in `config.yaml`
 3. Restart the gateway.
+
+On partial-native hosts, methods the host already provides are never
+overwritten: the shim fills only the gaps and reports what it skipped in
+`skipped_native_methods` (the notifier pair is always replaced — routing wake
+markers is the point, and the drift check refuses if the native watcher
+already routes them).
 
 No core patch, no Hermes source modification. The shim's drift detection will
 refuse to install (and the plugin will report `inspect_only`) if the target

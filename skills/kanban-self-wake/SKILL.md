@@ -1,7 +1,7 @@
 ---
 name: kanban-self-wake
 description: "Operational guide for Hermes Kanban session-wake subscriptions."
-version: "1.1.0"
+version: "1.2.0"
 metadata:
   hermes:
     tags: [kanban, self-wake, subscriptions, wake-routing]
