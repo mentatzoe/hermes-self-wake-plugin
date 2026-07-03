@@ -122,4 +122,4 @@ both the shim path and the optional core-patch path.
 
 ## License
 
-MIT — same as Hermes Agent.
+Apache-2.0.
