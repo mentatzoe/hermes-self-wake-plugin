@@ -1,3 +1,7 @@
+> **Historical / upstream-candidate artifact.** This describes the patch
+> as it would be proposed upstream; it is not a status tracker for this
+> repo (see the releases page for that).
+
 # Upstream PR: internal_session_wake_v1
 
 ## Description
@@ -24,11 +28,11 @@ adds `GatewayRunner.wake_session` with the v1 keyword contract, the `session_wak
 
 ## Checklist
 
-- [ ] All tests pass
-- [ ] No prompt-caching violation
-- [ ] No role-alternation violation
-- [ ] Active-session queueing tested
-- [ ] Receipt states tested
-- [ ] Dedupe tested
-- [ ] Capability probe function added
-- [ ] Documentation updated
+- All tests pass
+- No prompt-caching violation
+- No role-alternation violation
+- Active-session queueing tested
+- Receipt states tested
+- Dedupe tested
+- Capability probe function added
+- Documentation updated

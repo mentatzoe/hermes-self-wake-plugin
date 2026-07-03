@@ -86,9 +86,10 @@ classes at plugin load time:
 | `gateway.run.GatewayRunner` | `wake_session(*, payload, source_kind, session_key=None, session_id=None, dedupe_key=None)` + helpers | The wake primitive: resolves an existing session, injects a trusted `MessageEvent(internal=True)`, records a receipt. |
 | `gateway.kanban_watchers.GatewayKanbanWatchersMixin` | `_kanban_internal_wake_target` + replaces `_kanban_notifier_watcher` | Routes `session:` / `session_id:` markers through `wake_session` instead of visible `adapter.send`. **This is the wiring that makes wakes actually fire** — without it the plugin would report full but wakes would never happen (silent half-wake). |
 
-The `wake_session` / receipt / lookup implementations are carried verbatim
+For the surfaces the shim provides (Kanban wake, receipts, session lookup),
+the `wake_session` / receipt / lookup implementations are carried verbatim
 (comments trimmed) from `docs/core-patch/0001-internal-session-wake-v1.patch` so
-the shim provides behavior identical to the core patch.
+the shim's behavior matches the core patch. Cron-delivery wake, cross-session message wake, and native active-session queueing are core-patch/native-only: the shim does not provide them.
 
 ### Fail-closed on drift
 
@@ -154,7 +155,8 @@ wake) and is what the shim's implementations are derived from.
 
 ```bash
 cd $HERMES_HOME/hermes-agent
-git apply docs/core-patch/0001-internal-session-wake-v1.patch
+git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
+git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
 scripts/run_tests.sh tests/
 ```
 

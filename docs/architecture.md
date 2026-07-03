@@ -90,8 +90,23 @@ When the shim is enabled but drift is detected:
 - Doctor reports `compat_shim: fail` with the drifted target
 - The plugin stays `inspect_only` — no silent half-wake
 
-## Security
+## Security and trust model
 
+The plugin assumes a **single trusted operator per Hermes install**. It adds
+no access control of its own; everything below is inherited from the host.
+
+- Who can invoke the tools and `/self-wake`: whoever Hermes lets talk to the
+  agent on a platform where the `self_wake` toolset (tools) or the plugin
+  (command) is active. Gate access with Hermes' own platform allowlists; the
+  plugin does not check caller identity.
+- `wake_session` is not profile-gated: any caller who can reach the tools can
+  wake any session whose key or id they know. A leaked `session_key` means a
+  holder who can reach the tools can inject internal events into that
+  session. Treat session keys as operator-internal identifiers.
+- `notifier_profile` is a routing filter (which notifier instance collects a
+  subscription), not an ownership or permission boundary.
+- Cross-profile wakes are possible by design when the caller supplies the
+  target's key; nothing in the plugin forbids them.
 - Kanban notifier routing filters subscriptions by owning profile by default (`--notifier-profile` overrides); `wake_session` itself is not profile-gated
 - Receipts store bounded preview + hash, not full payloads
 - Logs include target/receipt identifiers, not full payloads/secrets

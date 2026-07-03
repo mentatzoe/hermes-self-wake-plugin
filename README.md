@@ -17,8 +17,9 @@ on vanilla Hermes when enabled.
 Implemented and released — see the
 [releases page](https://github.com/mentatzoe/hermes-self-wake-plugin/releases)
 for the changelog. The full test suite runs in CI on Python 3.10–3.13 against
-a temp `HERMES_HOME`, including the real plugin-loader path and end-to-end
-wake-dispatch tests. No Hermes core files are touched unless the operator
+a temp `HERMES_HOME`, including the real plugin-loader path and in-process
+contract tests covering wake dispatch and receipts (fake host, not a live
+gateway smoke). No Hermes core files are touched unless the operator
 explicitly chooses the optional reference core patch.
 
 ## Failure behaviour (what the code does when things go wrong)
@@ -31,7 +32,11 @@ one, that is a bug I want reported.
   one the call fails with `platform_required`. Targets not found in the
   session cache are flagged (`resolved_from_cache: false`) with a warning.
 - Each wake attempt writes a receipt, so "did it actually wake, and did the
-  agent respond?" is a query (`self_wake_receipts`) rather than a guess.
+  agent respond?" is a query (`self_wake_receipts`) rather than a guess. One
+  caveat an operator should know: a wake delivered into an already-active
+  session is receipted `queued`, and on hosts without the queued-finalization
+  refinement it can remain `queued` after the agent picks it up — treat that
+  as delivered-unconfirmed, not failed (details in the runbook).
 - A wake whose post-dispatch bookkeeping fails is recorded as
   `dispatched_unconfirmed` and is not retried, to avoid re-injecting a
   payload that already landed; concurrent wakes sharing a dedupe key are
@@ -56,30 +61,34 @@ history ledger and not the plugin contract. If Hermes later exposes a native
 resolver or `session_surfaces` table, the adapter should move behind the same
 `self_wake.sessions` helper surface.
 
-## How the wake capability is provided (portability model)
+## How the wake capability is provided
 
-The plugin needs the Hermes host capability `internal_session_wake_v1`. It can
-be provided three ways, **in preference order**:
+The plugin needs the Hermes host capability `internal_session_wake_v1`.
+Three provider paths exist. Two different orderings apply, and they are not
+the same thing:
 
-1. **Compat shim (portable, recommended for sharing)** — set
-   `self_wake.compat_shim_enabled: true` in `config.yaml`. The plugin installs
-   `wake_session`, the receipt methods, session lookup, the receipts table, and
-   Kanban notifier routing at runtime via class-level monkeypatching. **No core
-   patch required.** The shim fails closed on internal drift, defers to a
-   native capability when present, and on partial-native hosts fills only the
-   missing methods (never overwriting native ones). See
-   `docs/compatibility.md`.
-2. **Native (upstream or optional core patch)** — upstream Hermes ships the
-   capability, or the operator applies the optional reference patch under
-   `docs/core-patch/`. No monkeypatching. The shim auto-detects this and does
-   not install.
+- **Runtime precedence** (what the code prefers when both exist):
+  native > shim > absent. The shim always defers to a native capability and
+  fills only missing methods on partial-native hosts.
+- **Install path** (what to choose when your Hermes has no native
+  capability): the shim is the low-friction option because it patches
+  nothing on disk; the core patch is the full-capability option.
+
+1. **Native** — upstream Hermes ships the capability, or the operator applies
+   the reference patch under `docs/core-patch/`. No monkeypatching. This is
+   the full wake surface: Kanban, cron-delivery, and cross-session message
+   wakes, plus native active-session queueing.
+2. **Compat shim** — set `self_wake.compat_shim_enabled: true` in
+   `config.yaml`. No core patch; survives Hermes upgrades; installs at
+   runtime via class-level monkeypatching with drift checks that refuse to
+   install on host changes. **Scope: Kanban wake subscriptions, receipts,
+   and session lookup only. The shim does not provide cron-delivery or
+   cross-session message wakes, and active-session handling follows vanilla
+   busy semantics.** The capability matrix in `docs/compatibility.md` is
+   canonical — read it before choosing this path.
 3. **Absent** — the plugin loads in `inspect_only` mode and fails closed
    (`capability_missing`) for wake-mutating operations, refusing to write
    subscription markers that the host could not act on.
-
-The core patch under `docs/core-patch/` is an **optional reference / upstream
-candidate**, not the required path. The reason is portability + shareability:
-the plugin must work across Hermes upgrades without waiting on upstream.
 
 ## Critical Invariant: Visible Notification ≠ Internal Wake
 
@@ -99,9 +108,10 @@ hermes plugins install https://github.com/mentatzoe/hermes-self-wake-plugin.git 
 # 2. (Only if you installed without --enable)
 hermes plugins enable self-wake
 
-# 3. Add the toolset to your platform toolsets in ~/.hermes/config.yaml:
+# 3. APPEND self_wake to your existing platform_toolsets lists in
+#    ~/.hermes/config.yaml — do not replace the lists with this example:
 #    platform_toolsets:
-#      default: [web, terminal, file, self_wake]
+#      default: [web, terminal, file, self_wake]   # keep your existing entries
 
 # 4. (Portable path) Enable the compat shim — no core patch needed:
 #    self_wake:
@@ -122,6 +132,12 @@ both the shim path and the optional core-patch path.
 | `self_wake_subscribe_kanban` | Create/upgrade Kanban wake subscriptions with `session:` or `session_id:` markers | `internal_session_wake_v1` (native or shim) |
 | `self_wake_receipts` | Inspect wake receipts from `session_wake_receipts` | Receipt table present (shim or native) |
 | `self_wake_doctor` | End-to-end diagnostics: capability, shim, session resolver, receipts, Kanban DB, cron config | None (degraded reporting) |
+
+The plugin also registers one `pre_llm_call` hook: it appends the current
+session's identity to a local diagnostics cache at
+`$HERMES_HOME/self-wake/recent_sessions.json` (recent-session sightings for
+`doctor`; atomic writes; no prompt injection; not used for wake correctness;
+safe to delete).
 
 ## Slash Command
 

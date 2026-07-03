@@ -144,7 +144,12 @@ Filter by status:
 Receipt statuses:
 - `requested` — receipt reserved before dispatch
 - `dispatched` — event handed to adapter pipeline
-- `queued` — target session already active; event queued as follow-up
+- `queued` — the wake WAS delivered, into a session that was already busy;
+  the event lands as a follow-up when the session's current turn finishes.
+  On hosts without the queued-finalization refinement the receipt can remain
+  `queued` even after the agent processes the follow-up, so treat a lasting
+  `queued` as delivered-unconfirmed: check the target session's transcript
+  before treating it as a failure (which it usually is not)
 - `agent_responded` — a response was observed
 - `dispatched_unconfirmed` — the wake WAS injected but post-dispatch
   bookkeeping failed (e.g. the session task errored while awaited); not
@@ -174,7 +179,7 @@ Receipt payload previews are truncated to 200 characters by default. Full payloa
 3. Re-run `/self-wake doctor` — expect `mode: full`, `source: shim`, `compat_shim: ok`
 
 **Fix (optional core patch — native, full behavior):**
-1. Apply the patch: `cd $HERMES_HOME/hermes-agent && git apply docs/core-patch/0001-internal-session-wake-v1.patch`
+1. Apply the patch (check first): `cd $HERMES_HOME/hermes-agent && git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch && git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch`
 2. Restart Hermes / gateway
 3. Re-run `/self-wake doctor` — expect `mode: full`, `source: native`
 

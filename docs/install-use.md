@@ -25,9 +25,12 @@ self_wake:
   compat_shim_enabled: true
 ```
 
-The shim fails closed if Hermes internals drift, defers to a native capability
-when present, and provides behavior identical to the core patch for Kanban wake
-subscriptions. See `docs/compatibility.md` for the full shim contract.
+The shim fails closed if Hermes internals drift and defers to a native
+capability when present. For Kanban wake subscriptions its behavior matches
+the core patch. **It does not provide cron-delivery or cross-session message
+wakes — those need the native capability (Option B) or upstream Hermes** —
+and active-session handling follows vanilla busy semantics. The capability
+matrix in `docs/compatibility.md` is canonical.
 
 ### Option B — optional core patch (native, full behavior)
 
@@ -36,7 +39,8 @@ plus active-session queueing refinement and cron/send-message wake:
 
 ```bash
 cd $HERMES_HOME/hermes-agent
-git apply /path/to/plugin/docs/core-patch/0001-internal-session-wake-v1.patch
+git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
+git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
 scripts/run_tests.sh tests/
 ```
 
@@ -91,7 +95,10 @@ platform_toolsets:
     - self_wake
 ```
 
-If you skip this step, the tools will not be exposed to sessions and `/self-wake` will not be available.
+Add `self_wake` to `platform_toolsets` for each platform where the
+model-facing tools should be available — append to your existing lists, do
+not replace them. The `/self-wake` slash command is registered separately by
+the enabled plugin after restart and does not depend on toolsets.
 
 ## 5. Restart Hermes / gateway
 
