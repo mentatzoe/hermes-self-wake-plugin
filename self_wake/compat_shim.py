@@ -50,7 +50,7 @@ All imports are lazy (inside functions) so this module loads on any host.
 
 The ``wake_session`` / receipt / lookup implementations are carried verbatim
 (comments trimmed) from ``docs/core-patch/0001-internal-session-wake-v1.patch``
-so the shim provides behavior identical to the core patch.  The notifier
+so, for the surfaces the shim provides (Kanban wake, receipts, session lookup, notifier routing), its behavior matches the core patch.  The notifier
 replacement is the canonical patched ``_kanban_notifier_watcher``.
 
 FAIL-CLOSED CONTRACT

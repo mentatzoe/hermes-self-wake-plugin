@@ -163,8 +163,14 @@ The subscription writes `kanban_notify_subs.user_id = session:<session_key>` so 
 After a terminal event fires:
 
 ```
-/self-wake receipts --source-kind kanban --status agent_responded
+/self-wake receipts --source-kind kanban
 ```
+
+Read the statuses, not just the count: `agent_responded` is the strongest
+outcome; `queued` means delivered into an already-active session, and on
+hosts without queued-finalization it can persist after the agent picks the
+event up — confirm in the target session's transcript before treating it as
+a failure. Filter with `--status` only after the unfiltered view.
 
 ## Upgrade
 

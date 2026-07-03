@@ -16,8 +16,10 @@ vanilla Hermes without patching core.
 
 - Kanban wake subscriptions: a card's terminal events wake the subscribed
   session instead of stalling on a visible-only notification.
-- Wake receipts: every wake attempt is recorded, so "did it fire, and did
-  the agent respond?" is a query, not a guess.
+- Wake receipts: every attempt is recorded and usually answers whether it
+  dispatched and whether the agent responded; active-session `queued`
+  receipts may need transcript confirmation on hosts without
+  queued-finalization.
 - Diagnostics: `self_wake_doctor` reports the capability mode, its source,
   and exactly which probe failed when something is off.
 - Session discovery: resolve wake targets through a host-session resolver.
@@ -80,7 +82,8 @@ operations fail closed). Runtime precedence is always native > shim >
 absent.
 
 The failure posture in one line: fail closed rather than pretend, write a
-receipt for every attempt, never re-inject a delivered wake, never imply a
+receipt for every attempt (with the documented `queued` caveat), never
+re-inject a delivered wake, never imply a
 downgrade happened when it didn't. The full behaviour contract — enforced by
 the test suite — lives in `docs/compatibility.md`; the design and trust
 model in `docs/architecture.md`.

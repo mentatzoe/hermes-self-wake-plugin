@@ -5,7 +5,7 @@ implements the host capability required by the self-wake plugin.
 
 > **This patch is NOT required to use the plugin.** The bundled compat shim
 > (`self_wake/compat_shim.py`, enabled via `self_wake.compat_shim_enabled:
-> true`) provides the same capability on vanilla Hermes at runtime without
+> true`) provides the plugin-required Kanban wake surfaces on vanilla Hermes at runtime without
 > patching core. This patch is the **upstream-candidate** artifact: the
 > cleanest native implementation, and the source the shim's implementations
 > are derived from verbatim. Apply it when you want the native capability
@@ -40,13 +40,14 @@ the honest gap list.
 2. `feat(kanban): route session-targeted notify subscriptions through internal wake`
 3. `feat(send_message): wake mirrored target session after outbound delivery`
 4. `feat(cron): optionally wake target session after delivery`
-5. `docs/tests: capability contract and E2E fixtures`
+5. `docs/tests: capability contract and in-process fixture tests`
 
 ## How to apply (optional)
 
 ```bash
 cd $HERMES_HOME/hermes-agent
-git apply docs/core-patch/0001-internal-session-wake-v1.patch
+git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
+git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
 # Run core tests
 scripts/run_tests.sh tests/
 ```

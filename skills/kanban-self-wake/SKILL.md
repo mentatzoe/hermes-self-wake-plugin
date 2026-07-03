@@ -18,8 +18,8 @@ For Kanban wake to work, the `kanban_notify_subs.user_id` must be set to `sessio
 ## Prerequisites
 
 - Hermes with `internal_session_wake_v1`, provided **either** by:
-  - the bundled **compat shim** (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch), **or**
-  - the **optional core patch** under `docs/core-patch/` / upstream Hermes (native)
+  - the bundled **compat shim** (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch; covers **Kanban wakes, receipts, session lookup**), **or**
+  - the **optional core patch** under `docs/core-patch/` (full behavior: adds cron-delivery wake, cross-session message wake, and active-session queueing refinement; upstream Hermes does not currently ship the capability)
 - `self-wake` plugin installed and enabled
 - `self_wake` toolset added to platform_toolsets in config.yaml
 - Hermes/gateway restarted after enablement
@@ -65,8 +65,14 @@ Optional `--reset-cursor` to replay already-claimed events (use with care).
 ### Inspect receipts
 
 ```
-/self-wake receipts --source-kind kanban --status agent_responded
+/self-wake receipts --source-kind kanban
 ```
+
+Read the statuses, not just the count: `agent_responded` is the strongest
+outcome; `queued` means delivered into an already-active session, and on
+hosts without queued-finalization it can persist after the agent picks the
+event up — confirm in the target session's transcript before treating it as
+a failure. Filter with `--status` only after the unfiltered view.
 
 ### Subscribe by session_id
 

@@ -1,6 +1,6 @@
 # Compatibility
 
-## Capability Sources (preference order)
+## Capability provider paths and runtime precedence
 
 The plugin needs the Hermes host capability `internal_session_wake_v1`. It can
 be provided three ways:

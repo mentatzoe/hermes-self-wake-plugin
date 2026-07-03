@@ -4,7 +4,7 @@ A standalone plugin that owns operator policy and diagnostics (session
 discovery, Kanban wake subscription management, receipt inspection, doctor) and
 depends on a host-owned ``internal_session_wake_v1`` capability.
 
-The capability can be provided three ways, in preference order:
+The capability can be provided three ways (runtime precedence is always native > shim > absent):
 
 1. **Native** — upstream Hermes ships ``internal_session_wake_v1``, or the
    operator applies the optional reference core patch under
