@@ -34,3 +34,4 @@ htmlcov/
 # Temp
 *.bak
 *.tmp
+uv.lock
