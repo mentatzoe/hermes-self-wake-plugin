@@ -75,6 +75,24 @@ On hosts without `internal_session_wake_v1` (and without the shim enabled):
 
 On an unsupported host the plugin refuses to write subscription markers the host could not act on. This is enforced at tool-call time, not at plugin load time, so the plugin can still install and report diagnostics.
 
+On capable hosts, the same posture continues past the capability gate:
+
+- Subscribing does not guess the delivery platform: it is resolved from the
+  target session's cached origin or its session key; when neither yields one
+  the call fails with `platform_required`. Targets not found in the session
+  cache are flagged (`resolved_from_cache: false`) with a warning.
+- Each wake attempt writes a receipt. A wake delivered into an already-active
+  session is receipted `queued` and may remain so on hosts without the
+  queued-finalization refinement — treat as delivered-unconfirmed, not failed
+  (see the runbook's receipt-status reference).
+- A wake whose post-dispatch bookkeeping fails is recorded as
+  `dispatched_unconfirmed` and is not retried, to avoid re-injecting a
+  payload that already landed; concurrent wakes sharing a dedupe key are
+  deduplicated against in-flight receipts.
+- Re-subscribing a wake row with the visible-only flag preserves the wake
+  marker by design; the response says `downgrade_ignored` and warns that
+  wakes keep firing, rather than implying they stopped.
+
 ## The Compat Shim
 
 ### What it does

@@ -267,3 +267,12 @@ To stop a Kanban task from waking a session:
 2. Or disable the plugin entirely: `hermes plugins disable self-wake` and restart
 
 Disabling the plugin does not remove core capability or existing subscriptions.
+
+## The pre_llm_call diagnostics hook
+
+The plugin registers one `pre_llm_call` hook. It appends the current
+session's identity to a local diagnostics cache at
+`$HERMES_HOME/self-wake/recent_sessions.json` (atomic writes, bounded to 100
+entries). It returns nothing to the prompt (prompt-cache safe), is not part
+of wake correctness, and is not a canonical ledger — it exists so `doctor`
+and operators can see recently active sessions. Safe to delete at any time.
