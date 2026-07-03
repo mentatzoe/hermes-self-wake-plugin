@@ -69,7 +69,7 @@ On hosts without `internal_session_wake_v1` (and without the shim enabled):
 - `self_wake_doctor` reports `inspect_only` or `unsupported` mode and lists the specific probes that failed.
 - `self_wake_sessions` works read-only in all modes.
 
-The plugin never creates "looks subscribed but will never wake" state on an unsupported host. This is enforced at tool-call time, not at plugin load time, so the plugin can still install and report diagnostics.
+On an unsupported host the plugin refuses to write subscription markers the host could not act on. This is enforced at tool-call time, not at plugin load time, so the plugin can still install and report diagnostics.
 
 ## The Compat Shim
 

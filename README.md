@@ -21,27 +21,29 @@ a temp `HERMES_HOME`, including the real plugin-loader path and end-to-end
 wake-dispatch tests. No Hermes core files are touched unless the operator
 explicitly chooses the optional reference core patch.
 
-## Guarantees (fail-closed by design)
+## Failure behaviour (what the code does when things go wrong)
 
-- **No subscription that cannot fire.** The delivery platform is resolved from
-  the target session's cached origin or its session key — never guessed. When
-  neither yields one, subscribing fails with `platform_required`; targets not
-  found in the session cache are flagged (`resolved_from_cache: false`) with a
-  warning.
-- **Every wake attempt writes a receipt.** "Did it actually wake, and did the
-  agent respond?" is a query (`self_wake_receipts`), not a feeling.
-- **No double injection.** A wake whose post-dispatch bookkeeping fails is
-  recorded as `dispatched_unconfirmed` and never retried; concurrent wakes
-  sharing a dedupe key cannot both dispatch.
-- **The shim refuses rather than degrades.** Before installing, it verifies
-  every host internal the vendored code touches; on drift it refuses with a
-  structured reason instead of failing open. On partial-native hosts it fills
-  only the missing methods and reports what it skipped
-  (`skipped_native_methods`) — native implementations are never overwritten.
-- **Downgrades that cannot happen say so.** Re-subscribing a wake row with the
-  visible-only flag preserves the wake marker by design; the response says
-  `downgrade_ignored` and warns that wakes keep firing, instead of implying
-  they stopped.
+These are design rules, each enforced by tests. If you find a path around
+one, that is a bug I want reported.
+
+- Subscribing does not guess the delivery platform: it is resolved from the
+  target session's cached origin or its session key, and when neither yields
+  one the call fails with `platform_required`. Targets not found in the
+  session cache are flagged (`resolved_from_cache: false`) with a warning.
+- Each wake attempt writes a receipt, so "did it actually wake, and did the
+  agent respond?" is a query (`self_wake_receipts`) rather than a guess.
+- A wake whose post-dispatch bookkeeping fails is recorded as
+  `dispatched_unconfirmed` and is not retried, to avoid re-injecting a
+  payload that already landed; concurrent wakes sharing a dedupe key are
+  deduplicated against in-flight receipts.
+- The shim checks the host internals it depends on before installing; on
+  drift it refuses with a structured reason rather than installing anyway.
+  On partial-native hosts it fills only the missing methods and reports what
+  it skipped (`skipped_native_methods`), leaving native implementations in
+  place.
+- Re-subscribing a wake row with the visible-only flag preserves the wake
+  marker by design; the response says `downgrade_ignored` and warns that
+  wakes keep firing, rather than implying they stopped.
 
 ## Session discovery boundary
 
@@ -72,8 +74,8 @@ be provided three ways, **in preference order**:
    `docs/core-patch/`. No monkeypatching. The shim auto-detects this and does
    not install.
 3. **Absent** — the plugin loads in `inspect_only` mode and fails closed
-   (`capability_missing`) for wake-mutating operations. It never creates
-   "looks subscribed but will never wake" state.
+   (`capability_missing`) for wake-mutating operations, refusing to write
+   subscription markers that the host could not act on.
 
 The core patch under `docs/core-patch/` is an **optional reference / upstream
 candidate**, not the required path. The reason is portability + shareability:
