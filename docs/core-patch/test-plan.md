@@ -26,7 +26,7 @@
 - Active session not interrupted (queued as follow-up)
 - Multiple wakes dedupe correctly
 
-## E2E Tests
+## Plugin contract / operator smoke checks
 
 - Plugin doctor reports `full` mode with cap present
 - Plugin doctor reports `inspect_only` without cap

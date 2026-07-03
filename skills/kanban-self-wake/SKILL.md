@@ -1,7 +1,7 @@
 ---
 name: kanban-self-wake
 description: "Operational guide for Hermes Kanban session-wake subscriptions."
-version: "1.2.1"
+version: "1.2.2"
 metadata:
   hermes:
     tags: [kanban, self-wake, subscriptions, wake-routing]
@@ -104,7 +104,7 @@ The target session has no stored origin and no `chat_id` was passed explicitly. 
 
 ## Compatibility
 
-The plugin requires Hermes host capability `internal_session_wake_v1`, provided by the bundled compat shim (`self_wake.compat_shim_enabled: true` — portable, no core patch) or the optional core patch / upstream Hermes (native). Without it, subscribe and receipt operations return `capability_missing`. Session discovery and diagnostics work in `inspect_only` mode. `/self-wake doctor` reports the active `source` (native/shim/absent).
+The plugin requires Hermes host capability `internal_session_wake_v1`, see `docs/compatibility.md` in the plugin repo for the capability matrix; do not restate it here.
 
 ## See Also
 

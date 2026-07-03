@@ -278,6 +278,14 @@ def test_shim_disabled_by_default(hermes_home, monkeypatch):
     """Without enabling config, the shim does not install."""
     # _shim_config_enabled reads config; in the test env config returns {} so
     # compat_shim_enabled stays False (default).
+    # Isolate the native gate: on a Hermes-native dev host the real gateway
+    # modules are importable and the probes find real wake methods, which
+    # short-circuits install before the config gate (runtime precedence is
+    # native > shim). The config-gate behavior under test needs a vanilla host.
+    monkeypatch.setattr(caps, "_probe_gateway_wake_session",
+                        lambda: {"available": False})
+    monkeypatch.setattr(caps, "_probe_session_db_receipt_methods",
+                        lambda: {"available": False})
     monkeypatch.setattr(shim, "_shim_config_enabled", lambda: False)
     report = shim.install_shim()
     assert report["installed"] is False

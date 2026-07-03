@@ -31,7 +31,7 @@ Adds a generic `GatewayRunner.wake_session(...)` primitive to Hermes core:
 It also adds Kanban notifier routing, cron-delivery wake, and send-message
 mirror wake. The compat shim provides the first four (wake primitive + receipts
 + lookup + Kanban notifier routing) but NOT the active-session queueing
-refinement, cron wake, or send-message wake — see `docs/compatibility.md` for
+refinement, cron wake, or send-message wake — see [`../compatibility.md`](../compatibility.md) for
 the honest gap list.
 
 ## Patch series
