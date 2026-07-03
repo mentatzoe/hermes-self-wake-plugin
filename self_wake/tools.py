@@ -152,8 +152,22 @@ def record_recent_session(session_id: str = "", platform: str = "",
         data = [x for x in data
                 if not (isinstance(x, dict) and x.get("session_id") == session_id)]
         data.insert(0, summary)
-        path.write_text(_json.dumps(data[:100], indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8")
+        # Atomic replace: concurrent pre_llm_call hooks must not interleave
+        # partial writes (the read side self-heals, but a torn file loses the
+        # whole diagnostics history rather than one entry).
+        import os as _os
+        import tempfile as _tempfile
+        fd, tmp_name = _tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(_json.dumps(data[:100], indent=2, ensure_ascii=False) + "\n")
+            _os.replace(tmp_name, path)
+        except Exception:
+            try:
+                _os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("self-wake: recent session hook failed: %s", exc)
     return None

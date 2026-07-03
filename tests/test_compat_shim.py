@@ -27,7 +27,6 @@ import sqlite3
 import sys
 import types
 from pathlib import Path
-from typing import Any, Optional
 
 import pytest
 
@@ -202,7 +201,10 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
     @_dc.dataclass
     class _FakeMessageEvent:
         text: str = ""
+        message_type: object = None
+        source: object = None
         internal: bool = False
+        message_id: str = ""
         metadata: dict = _dc.field(default_factory=dict)
 
     class _FakeMessageType(_enum.Enum):

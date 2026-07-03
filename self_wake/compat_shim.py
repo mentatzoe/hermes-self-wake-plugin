@@ -385,8 +385,6 @@ async def _shim_wake_session(
     import asyncio
     import dataclasses
     import hashlib
-    from typing import Any as _Any
-    from typing import Dict
 
     session_db = getattr(self, "_session_db", None)
     if session_db is None:
@@ -596,7 +594,6 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
     import asyncio
     import os
     from pathlib import Path
-    from typing import Any
 
     logger = logging.getLogger("gateway.run")
     try:

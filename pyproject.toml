@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-self-wake"
-version = "1.2.0"
+version = "1.2.1"
 description = "Portable operator tools for Hermes internal session wake routing; bundles a compat shim for vanilla Hermes (native or shim capability sources; fails closed to inspect-only)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -32,3 +32,14 @@ include = ["self_wake*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fakes reproduce vanilla Hermes source shapes for the drift check's
+# inspect.getsource anchors; they are read, never executed.
+"tests/test_compat_shim.py" = ["F821", "F841", "E702", "E701"]

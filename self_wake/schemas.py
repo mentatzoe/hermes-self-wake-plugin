@@ -43,7 +43,7 @@ SELF_WAKE_SUBSCRIBE_KANBAN = {
             "board": {"type": "string", "description": "Kanban board slug. Defaults to 'default'."},
             "session_key": {"type": "string", "description": "Target gateway session key. Preferred when known."},
             "session_id": {"type": "string", "description": "Target Hermes session id. Used to resolve session_key when possible, otherwise session_id marker."},
-            "platform": {"type": "string", "description": "Delivery platform override. Defaults from target session origin or discord."},
+            "platform": {"type": "string", "description": "Delivery platform. Resolved from the target session's cached origin or parsed from the agent:<profile>:<platform>: session-key prefix; required (platform_required error) when neither yields one. Never guessed."},
             "chat_id": {"type": "string", "description": "Notifier delivery chat id override. Defaults from target session origin."},
             "thread_id": {"type": "string", "description": "Notifier thread/topic id override. Defaults from target session origin, else empty."},
             "notifier_profile": {"type": "string", "description": "Notifier owner profile. Defaults to active Hermes profile."},

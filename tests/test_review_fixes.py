@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from self_wake import config as config_mod
 from self_wake import doctor as doctor_mod

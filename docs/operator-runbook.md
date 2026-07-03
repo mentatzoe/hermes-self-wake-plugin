@@ -215,7 +215,11 @@ changed shape on this Hermes version.
 
 **Fix:**
 1. Run `/self-wake doctor` — check `kanban_db` status
-2. Re-subscribe with `--dry-run` and inspect `user_id_marker`
+2. Re-subscribe with `--dry-run` and inspect `user_id_marker`, `platform`, and
+   `resolved_from_cache`. A `false` there means the target session was not in
+   the current-session cache: the marker was written as given, so a typo'd
+   session key or wrong platform is the usual cause. `error: platform_required`
+   means no platform could be resolved — pass `--platform` explicitly.
 3. If `visible_only: true`, the row was deliberately created with `--force-degraded-visible-only`; re-subscribe without that flag to enable wakes. (Capability-missing hosts fail closed with `error: capability_missing` and never write visible-only rows.)
 4. If the backend reports `kanban_unavailable`, ensure `hermes_cli.kanban_db` is importable in the Hermes process
 

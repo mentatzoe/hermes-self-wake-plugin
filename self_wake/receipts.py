@@ -16,9 +16,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from .capabilities import _hermes_home, _state_db_path
+from .capabilities import _state_db_path
 from .config import get_int
 
 logger = logging.getLogger(__name__)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import inspect
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 # Minimum host capability version the plugin requires for wake-mutating
 # operations. The core patch exposes ``internal_session_wake_v1``; there is no
