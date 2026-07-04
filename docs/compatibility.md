@@ -22,7 +22,7 @@ be provided three ways:
 When both the shim and a native capability are available, **native wins**: the
 shim detects the native capability via the structural probe and does not
 install. This lets an operator enable the shim defensively and then remove it
-once upstream ships the capability natively, with no behavior change.
+once upstream ships the capability natively: the plugin should select the same `full` mode through the same probe contract, and operator workflows stay the same provided the native implementation conforms to `internal_session_wake_v1`.
 
 `self_wake_doctor` and `probe_wake_capability` report the active `source`
 (`native` / `shim` / `absent`) so operators can see which path is providing the
