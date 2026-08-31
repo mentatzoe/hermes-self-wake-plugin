@@ -6,14 +6,16 @@ from self_wake import capabilities as caps
 
 def test_probe_returns_structured_result(hermes_home):
     result = caps.probe_wake_capability()
-    for key in ("available", "version", "mode", "source", "details",
+    for key in ("available", "version", "mode", "source", "details", "surfaces",
                 "required_capability", "required_version"):
         assert key in result
     assert result["mode"] in ("full", "inspect_only", "unsupported")
     assert result["source"] in ("native", "shim", "absent")
     assert result["required_capability"] == "internal_session_wake"
     assert result["required_version"] == 1
-    assert isinstance(result["details"], list) and len(result["details"]) == 7
+    assert isinstance(result["details"], list) and len(result["details"]) == 8
+    assert set(result["surfaces"]) == {"kanban", "cron_delivery"}
+    assert result["surfaces"]["kanban"]["mode"] == result["mode"]
 
 
 def test_unsupported_mode_when_nothing_readable(monkeypatch, tmp_path):
@@ -46,6 +48,32 @@ def test_full_mode_when_all_probes_pass(full_capability, state_db_with_receipts)
     assert cap["mode"] == "full"
     assert cap["available"] is True
     assert cap["version"] == 1
+    assert cap["surfaces"]["kanban"]["available"] is True
+    assert cap["surfaces"]["cron_delivery"] == {
+        "available": True,
+        "mode": "full",
+        "source": "native",
+    }
+
+
+def test_kanban_full_does_not_claim_cron_delivery_when_adapter_absent(
+        full_capability, state_db_with_receipts, monkeypatch):
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {
+            "probe": "cron_delivery_routing",
+            "available": False,
+            "source": "absent",
+            "reason": "plugin adapter not adopted after install",
+        },
+    )
+    cap = caps.probe_wake_capability()
+    assert cap["mode"] == "full"  # Kanban remains healthy.
+    assert cap["available"] is True
+    assert cap["surfaces"]["cron_delivery"]["available"] is False
+    assert cap["surfaces"]["cron_delivery"]["mode"] == "unavailable"
+    assert "not adopted" in cap["surfaces"]["cron_delivery"]["reason"]
 
 
 def test_require_capability_returns_none_when_full(full_capability, state_db_with_receipts):

@@ -61,6 +61,12 @@ class _FakeSessionStore:
                     return entry
         return None
 
+    def list_sessions(self, active_minutes=None):
+        del active_minutes
+        with self._lock:
+            self._ensure_loaded_locked()
+            return list(self._entries.values())
+
 
 class _FakeSessionDB:
     """Vanilla SessionDB shape: has _execute_write + get_messages, but NO
@@ -96,8 +102,8 @@ class _FakeGatewayRunner:
     adapters, but has NO wake_session."""
 
     def __init__(self):
-        self.session_store = None
-        self._session_db = None
+        self.session_store: object = None
+        self._session_db: object = None
         self.adapters = {}
 
 
@@ -185,6 +191,9 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
 
     fake_run_mod = types.ModuleType("gateway.run")
     fake_run_mod.GatewayRunner = gateway_runner  # type: ignore[attr-defined]
+    fake_active_runner = gateway_runner()
+    fake_active_runner.session_store = session_store()
+    fake_run_mod._gateway_runner_ref = lambda: fake_active_runner  # type: ignore[attr-defined]
 
     fake_kw_mod = types.ModuleType("gateway.kanban_watchers")
     fake_kw_mod.GatewayKanbanWatchersMixin = kanban_mixin  # type: ignore[attr-defined]
@@ -225,6 +234,32 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
     fake_hermes_cli_pkg = types.ModuleType("hermes_cli")
     fake_hermes_cli_pkg.kanban_db = fake_kdb_mod  # type: ignore[attr-defined]
 
+    fake_cron_scheduler = types.ModuleType("cron.scheduler")
+
+    def _fake_deliver_result(job, content, adapters=None, loop=None):
+        return None
+
+    def _fake_maybe_mirror_cron_delivery(
+        job, platform_name, chat_id, mirror_text, thread_id=None, user_id=None,
+        *, enabled=False,
+    ):
+        return None
+
+    fake_cron_scheduler._deliver_result = _fake_deliver_result  # type: ignore[attr-defined]
+    fake_cron_scheduler._maybe_mirror_cron_delivery = _fake_maybe_mirror_cron_delivery  # type: ignore[attr-defined]
+    fake_cron_scheduler.load_config = lambda: {}  # type: ignore[attr-defined]
+    # Admit only this test fixture's exact source digest. Production retains the
+    # closed current-host manifest; monkeypatch removes this entry after the test.
+    from self_wake import cron_adapter
+    fixture_digest = cron_adapter._function_digest(_fake_deliver_result)
+    monkeypatch.setitem(
+        cron_adapter.SUPPORTED_HOSTS,
+        fixture_digest,
+        {"commit": "test-fixture", "function": "cron.scheduler._deliver_result"},
+    )
+    fake_cron_pkg = types.ModuleType("cron")
+    fake_cron_pkg.scheduler = fake_cron_scheduler  # type: ignore[attr-defined]
+
     fake_gateway_pkg = types.ModuleType("gateway")
     fake_gateway_pkg.run = fake_run_mod  # type: ignore[attr-defined]
     fake_gateway_pkg.session = fake_session_mod  # type: ignore[attr-defined]
@@ -240,11 +275,14 @@ def _install_fake_modules(monkeypatch, *, session_store=_FakeSessionStore,
     monkeypatch.setitem(sys.modules, "gateway.platforms.base", fake_base_mod)
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kdb_mod)
+    monkeypatch.setitem(sys.modules, "cron", fake_cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_cron_scheduler)
     return {
         "session_store": session_store,
         "session_db": session_db,
         "gateway_runner": gateway_runner,
         "kanban_mixin": kanban_mixin,
+        "cron_scheduler": fake_cron_scheduler,
     }
 
 
@@ -300,6 +338,68 @@ def test_shim_installs_when_enabled_on_vanilla(vanilla_hermes, monkeypatch):
     assert report["installed"] is True
     assert report["reason"] == "shim_installed"
     assert shim.is_installed() is True
+
+
+def test_cron_adapter_drift_does_not_remove_kanban_wake(vanilla_hermes, monkeypatch):
+    """Cron drift is independent even during the shim's preflight gate."""
+    from self_wake import cron_adapter
+
+    monkeypatch.setattr(
+        cron_adapter,
+        "check_compatibility",
+        lambda **kwargs: {
+            "compatible": False,
+            "status": "host_drift",
+            "detail": "unsupported cron scheduler shape",
+        },
+    )
+    monkeypatch.setattr(
+        cron_adapter,
+        "install",
+        lambda **kwargs: {
+            "installed": False,
+            "reason": "host_drift",
+            "detail": "unsupported cron scheduler shape",
+        },
+    )
+
+    report = shim.install_shim(force=True)
+
+    assert report["installed"] is True
+    assert report["reason"] == "shim_installed"
+    assert report["targets"]["kanban_notifier.routing"] is True
+    assert report["targets"]["cron_delivery.routing"] is False
+    assert report["cron_adapter"]["reason"] == "host_drift"
+    assert shim.is_installed() is True
+
+    from gateway.run import GatewayRunner  # type: ignore
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin  # type: ignore
+
+    assert hasattr(GatewayRunner, "wake_session")
+    assert hasattr(GatewayKanbanWatchersMixin, "_kanban_internal_wake_target")
+
+
+def test_class_install_assignment_failure_rolls_back_every_prior_mutation(
+        vanilla_hermes):
+    class RejectSecondReceipt(type):
+        def __setattr__(cls, name, value):
+            if name == "update_session_wake_receipt":
+                raise RuntimeError("second class assignment rejected")
+            super().__setattr__(name, value)
+
+    class FailingSessionDB(_FakeSessionDB, metaclass=RejectSecondReceipt):
+        pass
+
+    targets = dict(vanilla_hermes)
+    targets["session_db"] = FailingSessionDB
+    report = shim.install_shim(force=True, force_targets=targets)
+
+    assert report["installed"] is False
+    assert report["reason"] == "class_install_failed"
+    assert not hasattr(_FakeSessionStore, "lookup_by_session_key")
+    assert not hasattr(FailingSessionDB, "create_session_wake_receipt")
+    assert not hasattr(_FakeGatewayRunner, "wake_session")
+    assert _FakeKanbanMixin._kanban_notifier_watcher is not shim._shim_kanban_notifier_watcher
 
 
 # --------------------------------------------------------------------------- #

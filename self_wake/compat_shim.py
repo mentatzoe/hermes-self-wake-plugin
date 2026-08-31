@@ -79,8 +79,8 @@ exposes the capability natively, operators set ``compat_shim_enabled: false``
 (or the shim auto-detects native and skips) and remove the shim — no plugin
 behavior changes because the capability probes are identical.
 
-WHAT THE SHIM DOES NOT PROVIDE
-------------------------------
+ADDITIONAL CRON ADAPTER
+-----------------------
 The core patch also refines active-session wake queueing in
 ``gateway/platforms/base.py`` (internal wakes queue without interrupting a
 running agent).  The shim does NOT monkeypatch ``base.py``; on vanilla Hermes a
@@ -88,8 +88,9 @@ wake to an already-active session is handled by the host's default busy-session
 policy (interrupt or queue per config).  The wake event is always delivered and
 receipted — only the active-session queuing semantics differ.  This is
 documented honestly in ``docs/compatibility.md``.  Cron-delivery wake
-(``cron.wake_agent_on_delivery``) and send-message mirror wake are likewise not
-wired by the shim; they require the core patch or a future upstream capability.
+(``cron.wake_agent_on_delivery``) is provided by the companion plugin-owned,
+exact-host-checked ``self_wake.cron_adapter``.  Send-message mirror wake remains
+outside this plugin's supported surface.
 """
 from __future__ import annotations
 
@@ -1092,14 +1093,42 @@ def install_shim(
         originals.append((cls, name, existing))
         setattr(cls, name, fn)
 
-    _assign(SessionStore, "lookup_by_session_key", _shim_lookup_by_session_key)
-    _assign(SessionDB, "create_session_wake_receipt", _shim_create_session_wake_receipt)
-    _assign(SessionDB, "update_session_wake_receipt", _shim_update_session_wake_receipt)
-    _assign(GatewayRunner, "wake_session", _shim_wake_session)
-    _assign(GatewayRunner, "_lookup_session_entry_for_wake", _shim_lookup_session_entry_for_wake)
-    _assign(GatewayRunner, "_wake_message_ids_after", _shim_wake_message_ids_after)
-    _assign(Mixin, "_kanban_internal_wake_target", _shim_kanban_internal_wake_target, always=True)
-    _assign(Mixin, "_kanban_notifier_watcher", _shim_kanban_notifier_watcher, always=True)
+    try:
+        _assign(SessionStore, "lookup_by_session_key", _shim_lookup_by_session_key)
+        _assign(SessionDB, "create_session_wake_receipt", _shim_create_session_wake_receipt)
+        _assign(SessionDB, "update_session_wake_receipt", _shim_update_session_wake_receipt)
+        _assign(GatewayRunner, "wake_session", _shim_wake_session)
+        _assign(GatewayRunner, "_lookup_session_entry_for_wake", _shim_lookup_session_entry_for_wake)
+        _assign(GatewayRunner, "_wake_message_ids_after", _shim_wake_message_ids_after)
+        _assign(Mixin, "_kanban_internal_wake_target", _shim_kanban_internal_wake_target, always=True)
+        _assign(Mixin, "_kanban_notifier_watcher", _shim_kanban_notifier_watcher, always=True)
+    except Exception as exc:  # noqa: BLE001
+        rollback_errors: list[str] = []
+        for cls, name, original in reversed(originals):
+            try:
+                _restore(cls, name, original)
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_errors.append(f"{cls.__name__}.{name}: {rollback_exc}")
+        report = {
+            "installed": False,
+            "reason": "class_install_failed",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "rollback_errors": rollback_errors,
+        }
+        _install_report = report
+        return report
+
+    # Cron delivery is an independent capability surface.  Attempt its
+    # exact-host adapter after the Kanban shim, but never roll back a healthy
+    # Kanban installation merely because this separate private seam drifted.
+    # Diagnostics expose the cron failure as degraded whenever the operator has
+    # cron.wake_agent_on_delivery enabled.
+    from . import cron_adapter
+    cron_module = targets.get("cron_scheduler") if force_targets is not None else None
+    cron_report = cron_adapter.install(module=cron_module, force=force_targets is not None)
+    cron_routing = bool(cron_report.get("installed")) or str(
+        cron_report.get("reason", "")
+    ).endswith("cron_capability_present")
 
     global _originals
     _originals = originals
@@ -1122,7 +1151,9 @@ def install_shim(
             "session_db.receipt_methods": True,
             "gateway_runner.wake_session": True,
             "kanban_notifier.routing": True,
+            "cron_delivery.routing": cron_routing,
         },
+        "cron_adapter": cron_report,
     }
     _install_report = report
     logger.info("self-wake compat shim installed (provides internal_session_wake_v1 on vanilla Hermes)")
@@ -1146,6 +1177,13 @@ def uninstall_shim() -> dict:
             _restore(cls, name, original)
         except Exception as exc:  # noqa: BLE001
             logger.debug("self-wake shim: restore %s.%s failed: %s", cls, name, exc)
+
+    try:
+        from . import cron_adapter
+
+        cron_adapter.uninstall()
+    except Exception:  # noqa: BLE001
+        logger.debug("self-wake shim: cron adapter restore failed", exc_info=True)
 
     _installed = False
     _originals = []

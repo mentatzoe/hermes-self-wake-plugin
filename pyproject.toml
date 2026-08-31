@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-self-wake"
-version = "1.2.2"
-description = "Portable operator tools for Hermes internal session wake routing; bundles a compat shim for vanilla Hermes (native or shim capability sources; fails closed to inspect-only)."
+version = "1.3.0"
+description = "Portable operator tools for Hermes internal session wake routing, including exact-host-checked Kanban and cron-delivery adapters."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"

@@ -240,6 +240,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
                             lambda hh=None: {"probe": "session_resolver", "available": True})
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": True})
+        monkeypatch.setattr(caps, "_probe_cron_delivery_routing",
+                            lambda: {"probe": "cron_delivery_routing", "available": True,
+                                     "source": "native"})
     elif mode == "inspect_only":
         # Wake primitive absent, but session resolver + state.db readable.
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
@@ -261,6 +264,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": False,
                                      "reason": "_kanban_internal_wake_target not present on mixin"})
+        monkeypatch.setattr(caps, "_probe_cron_delivery_routing",
+                            lambda: {"probe": "cron_delivery_routing", "available": False,
+                                     "source": "absent", "reason": "cron adapter not adopted"})
     elif mode == "unsupported":
         monkeypatch.setattr(caps, "_probe_gateway_wake_session",
                             lambda: {"probe": "gateway.wake_session", "available": False,
@@ -283,6 +289,9 @@ def _set_capability(monkeypatch, mode: str, hermes_home):
         monkeypatch.setattr(caps, "_probe_notifier_routing",
                             lambda: {"probe": "notifier_routing", "available": False,
                                      "reason": "gateway.kanban_watchers.GatewayKanbanWatchersMixin not importable"})
+        monkeypatch.setattr(caps, "_probe_cron_delivery_routing",
+                            lambda: {"probe": "cron_delivery_routing", "available": False,
+                                     "source": "absent", "reason": "cron.scheduler not importable"})
     return mode
 
 

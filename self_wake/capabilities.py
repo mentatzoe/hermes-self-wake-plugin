@@ -242,6 +242,17 @@ def _probe_notifier_routing() -> dict:
     return {"probe": "notifier_routing", "available": True}
 
 
+def _probe_cron_delivery_routing() -> dict:
+    """Probe cron delivery independently from the Kanban wake surface."""
+    try:
+        from . import cron_adapter
+
+        result = cron_adapter.probe()
+    except Exception as exc:  # noqa: BLE001
+        result = {"available": False, "source": "absent", "reason": str(exc)}
+    return {"probe": "cron_delivery_routing", **result}
+
+
 def _capability_source(available: bool) -> str:
     """Report whether the capability is native, shim-provided, or absent."""
     if not available:
@@ -282,6 +293,7 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         _probe_receipt_table(hermes_home),
         _probe_session_resolver_readable(hermes_home),
         _probe_notifier_routing(),
+        _probe_cron_delivery_routing(),
     ]
     by_probe = {d["probe"]: bool(d.get("available")) for d in details}
     wake_present = (
@@ -296,6 +308,9 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
     # state.db existence (even without the receipt table) still counts as a
     # readable surface for inspect-only mode.
     state_db_exists = _state_db_path(hermes_home).exists()
+    cron_detail = next(
+        d for d in details if d.get("probe") == "cron_delivery_routing"
+    )
 
     if wake_present:
         mode = "full"
@@ -310,14 +325,31 @@ def probe_wake_capability(hermes_home: str | Path | None = None) -> dict:
         available = False
         version = None
 
+    kanban_source = _capability_source(available)
+    cron_surface = {
+        "available": bool(cron_detail.get("available")),
+        "mode": "full" if cron_detail.get("available") else "unavailable",
+        "source": str(cron_detail.get("source") or "absent"),
+    }
+    if cron_detail.get("reason"):
+        cron_surface["reason"] = str(cron_detail["reason"])
+
     return {
         "available": available,
         "version": version,
         "mode": mode,
-        "source": _capability_source(available),
+        "source": kanban_source,
         "required_capability": REQUIRED_CAPABILITY,
         "required_version": REQUIRED_VERSION,
         "details": details,
+        "surfaces": {
+            "kanban": {
+                "available": available,
+                "mode": mode,
+                "source": kanban_source,
+            },
+            "cron_delivery": cron_surface,
+        },
     }
 
 

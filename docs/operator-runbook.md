@@ -1,284 +1,207 @@
 # Operator Runbook
 
-## Verify capability and health
+## 1. Verify runtime adoption
 
-Run end-to-end diagnostics:
+Run after every install, plugin update, host update, or gateway restart:
 
-```
+```text
 /self-wake doctor
 ```
 
-The doctor checks:
-- `core_capability` — `internal_session_wake_v1` present and version, with `source` (native/shim/absent)
-- `compat_shim` — compat shim status (installed / disabled / native-present / drift-fail)
-- `session_resolver` — host session resolver readable and non-empty (current adapter: gateway current-session cache + `state.db`)
-- `receipt_table` — `session_wake_receipts` present and counts
-- `kanban_db` — Kanban DB reachable and existing subscriptions
-- `cron_wake_config` — `cron.wake_agent_on_delivery` state
+Doctor checks:
 
-Output fields:
-- `ok` — true only in full mode with zero failures
-- `mode` — `full`, `inspect_only`, or `unsupported`
-- `failures` — blocking issues
-- `warnings` — non-blocking concerns
-- `remediation` — suggested fixes
+- `kanban_wake_capability` — Kanban wake primitive, receipts, lookup, and notifier routing;
+- `cron_delivery_capability` — successful cron delivery actually routes to internal wake;
+- `core_capability` — backward-compatible alias explicitly scoped to Kanban;
+- `compat_shim` — installed, disabled, native-present, or drift refusal;
+- `session_resolver`, `receipt_table`, `kanban_db`;
+- `cron_wake_config`.
 
-## Resolve a target session
+When `cron.wake_agent_on_delivery=true`, accept health only when:
 
-Resolve by session key (preferred when known):
-
+```text
+ok=true
+mode=full
+kanban_wake_capability=ok
+cron_delivery_capability=ok source=shim|native
 ```
+
+Never infer cron health from top-level `mode=full`; that field remains the
+Kanban mode for compatibility. `mode=degraded` + `ok=false` means Kanban is
+healthy but configured cron wake is unavailable.
+
+If cron config is unreadable/unparseable or the cron section is absent, policy
+is unknown. With routing absent, require `ok=false`, `mode=degraded`, and the
+remediation “Config could not be read and cron routing cannot be verified.” It
+must never be described as policy off.
+
+## 2. Resolve a target session
+
+```text
 /self-wake sessions --session-key "agent:main:discord:thread:1511162896762142980:1511162896762142980"
-```
-
-Resolve by query:
-
-```
 /self-wake sessions --query "kanban worker"
-```
-
-Filter by platform, chat, or thread:
-
-```
 /self-wake sessions --platform discord --chat-id 123456 --thread-id 789012
 ```
 
-The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, `display_name`, `title`, `origin`, and a top-level `resolver_source` object. On current Hermes that resolver source is `current_session_cache_adapter`; the cache path is diagnostic detail, not the plugin's public contract.
+The current resolver adapts the gateway current-session cache and `state.db`.
+The cache path is private adapter detail, not a durable public contract.
 
-### Discord thread session-key shape
+## 3. Subscribe Kanban
 
-Discord thread keys follow this shape:
+Dry-run first:
 
-```
-agent:<profile>:discord:thread:<thread_id>:<thread_id>
-```
-
-For example:
-
-```
-agent:main:discord:thread:1511162896762142980:1511162896762142980
+```text
+/self-wake subscribe --task-id t_abc123 --session-key "agent:main:discord:thread:..." --dry-run
 ```
 
-## Subscribe a Kanban task to internal wake
+Then write:
 
-### Dry-run first
-
-Always preview before writing:
-
-```
-/self-wake subscribe --task-id t_abc123 --session-key "agent:main:discord:thread:1511162896762142980:1511162896762142980" --dry-run
+```text
+/self-wake subscribe --task-id t_abc123 --session-key "agent:main:discord:thread:..."
 ```
 
-The dry-run reports:
-- `target_kind` — `session_key` or `session_id`
-- `user_id_marker` — the `session:` or `session_id:` marker that would be written
-- `before` / `after` — row state before and after (null in dry-run)
-- `capability_mode` — `full`, `inspect_only`, or `unsupported`
+Useful flags:
 
-### Real subscribe
+- `--reset-cursor` replays already-claimed events; assess duplicate risk first;
+- `--notifier-profile default` overrides notifier owner;
+- `--board <slug>` selects a board.
 
-If the dry-run looks correct:
+A capability-missing host fails closed and does not write a session marker.
+Re-subscribing with visible-only does not downgrade an existing wake marker.
 
-```
-/self-wake subscribe --task-id t_abc123 --session-key "agent:main:discord:thread:1511162896762142980:1511162896762142980"
-```
+## 4. Verify receipts
 
-Optional flags:
-- `--reset-cursor` — sets `last_event_id=0` after subscribing so already-claimed terminal events replay. Use only after checking for duplicate risk.
-- `--notifier-profile default` — override the notifier owner profile (defaults to active profile)
-- `--board default` — target a non-default Kanban board slug
-
-### Subscribe by session_id instead of session_key
-
-```
-/self-wake subscribe --task-id t_abc123 --session-id "20260101_120000_aaaaaa"
-```
-
-The plugin resolves the session_id to a session_key when possible; if not resolvable, it writes a `session_id:<id>` marker.
-
-### Result shapes
-
-**Success (full mode):**
-- `success: true`
-- `user_id_marker: "session:agent:main:discord:thread:..."`
-- `internal_wake_enabled: true`
-- `before` and `after` show the row mutation
-
-**Fail-closed (inspect_only mode):**
-- `success: false`
-- `error: "capability_missing"`
-- `remediation: "Enable the bundled compat shim (self_wake.compat_shim_enabled: true) ... or apply the optional core patch from docs/core-patch/"`
-
-**Ambiguous session:**
-- `success: false`
-- `error: "ambiguous_session"`
-- `matches` lists the candidates
-- Pass an explicit `session_key` or `session_id` to disambiguate
-
-## Verify via receipts
-
-Inspect receipts to confirm a wake actually queued/dispatched/responded:
-
-```
+```text
 /self-wake receipts --source-kind kanban
+/self-wake receipts --source-kind cron_delivery
+/self-wake receipts --session-key "agent:main:discord:thread:..."
 ```
 
-Read the statuses, not just the count: `agent_responded` is the strongest
-outcome; `queued` means delivered into an already-active session, and on
-hosts without queued-finalization it can persist after the agent picks the
-event up — confirm in the target session's transcript before treating it as
-a failure. Filter with `--status` only after the unfiltered view.
+Statuses:
 
-Filter by session:
+- `requested` — receipt reserved;
+- `dispatched` — event handed to adapter pipeline;
+- `queued` — delivered to an already-busy session;
+- `agent_responded` — assistant row observed;
+- `dispatched_unconfirmed` — injection happened but bookkeeping failed; do not retry blindly;
+- `failure` — failed before injection; retryable;
+- deduped response — existing dedupe receipt reused.
 
-```
-/self-wake receipts --session-key "agent:main:discord:thread:1511162896762142980:1511162896762142980"
-```
+A persistent `queued` row can be delivered-but-unfinalized on shim hosts; check
+the target transcript before classifying it as failure.
 
-Filter by session_id:
+## 5. Harmless current-host canary
 
-```
-/self-wake receipts --session-id "20260101_120000_aaaaaa"
-```
-
-Filter by status:
-
-```
-/self-wake receipts --status failure
+```bash
+python scripts/current_host_cron_smoke.py \
+  --host-checkout /path/to/hermes-agent-at-21895bd39d
 ```
 
-Receipt statuses:
-- `requested` — receipt reserved before dispatch
-- `dispatched` — event handed to adapter pipeline
-- `queued` — the wake WAS delivered, into a session that was already busy;
-  the event lands as a follow-up when the session's current turn finishes.
-  On hosts without the queued-finalization refinement the receipt can remain
-  `queued` even after the agent processes the follow-up, so treat a lasting
-  `queued` as delivered-unconfirmed: check the target session's transcript
-  before treating it as a failure (which it usually is not)
-- `agent_responded` — a response was observed
-- `dispatched_unconfirmed` — the wake WAS injected but post-dispatch
-  bookkeeping failed (e.g. the session task errored while awaited); not
-  retried, because retrying would inject the payload again
-- `failure` — dispatch/wake failed before injection; retryable
-- `deduped` — existing receipt reused for dedupe key (in-flight `requested`
-  receipts younger than 2 minutes are not retried, so concurrent wakes with
-  one dedupe key cannot double-dispatch)
+Require JSON fields:
 
-Receipt payload previews are truncated to 200 characters by default. Full payloads are not echoed.
+- `ok=true`;
+- exact host commit;
+- startup installation retained both wrappers while the active runner was not
+  yet available, followed by healthy adoption after runner construction;
+- both adoption wrappers true (`_deliver_result` and
+  `_maybe_mirror_cron_delivery`);
+- `delivery_count=1`;
+- `internal_event_count=1`;
+- receipt `source_kind=cron_delivery`, `status=agent_responded`;
+- message roles `[user, assistant]` in the same existing session.
 
-## Diagnose failures
+This uses a disposable `/tmp` `HERMES_HOME` and local transport; it does not
+restart the live gateway or call Discord/Telegram.
 
-### `capability_missing` on subscribe
+## 6. Diagnose cron failures
 
-**Symptom:** `/self-wake subscribe` returns `error: capability_missing`.
+### `cron_delivery_capability: fail` + `plugin cron adapter not adopted`
 
-**Cause:** The host lacks `internal_session_wake_v1` (no native capability and the shim is not enabled).
+Cause: matching code may be on disk, but the running gateway still has the old
+function object.
 
-**Fix (portable — no core patch):**
-1. Enable the compat shim in `~/.hermes/config.yaml`:
-   ```yaml
-   self_wake:
-     compat_shim_enabled: true
-   ```
-2. Restart Hermes / gateway
-3. Re-run `/self-wake doctor` — expect `mode: full`, `source: shim`, `compat_shim: ok`
+Fix:
 
-**Fix (optional core patch — native, full behavior):**
-1. Apply the patch (check first): `cd $HERMES_HOME/hermes-agent && git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch && git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch`
-2. Restart Hermes / gateway
-3. Re-run `/self-wake doctor` — expect `mode: full`, `source: native`
+1. verify installed plugin is version 1.3.0;
+2. verify `self_wake.compat_shim_enabled: true`;
+3. restart the gateway from an outside shell;
+4. rerun doctor and require cron source `shim` or `native`.
 
-If `/self-wake doctor` shows `compat_shim: fail`, the shim's drift check refused
-to install (Hermes internals changed). Update the plugin or apply the optional
-core patch.
+### `cron_delivery_capability: fail` + `host_drift`
 
-### `compat_shim: fail` in doctor
+Cause: `_deliver_result`, `_maybe_mirror_cron_delivery`, `load_config`, or
+`SessionStore.list_sessions` does not match the closed compatibility manifest,
+or a required active-runner attribute is absent. The detail names the seam.
 
-**Symptom:** `compat_shim` check shows `fail` with "private Hermes internals drifted".
+Fix:
 
-**Cause:** The shim's drift detection found that a private Hermes internal the
-shim wraps (SessionStore, SessionDB, GatewayRunner, or the Kanban notifier) has
-changed shape on this Hermes version.
+1. do **not** force the wrapper;
+2. update to a self-wake version matching the host, or pin Hermes to the exact
+   supported commit;
+3. restart;
+4. rerun doctor and the receipt-backed canary.
 
-**Fix:**
-1. Update the self-wake plugin to a version matching this Hermes, **or**
-2. Apply the optional core patch from `docs/core-patch/` (native capability, no shim needed)
-3. Restart Hermes / gateway
+The retired core patch is not remediation.
 
-### Receipts empty but subscribe succeeded
+### Delivery succeeded but no `cron_delivery` receipt
 
-**Symptom:** Subscribe reports success, but receipts show nothing.
+1. confirm doctor sees `wake_agent_on_delivery=true` and cron capability `ok`;
+2. confirm each successful actual delivery route maps to exactly one existing
+   session with matching platform/chat/thread/user origin;
+3. confirm the gateway loop and adapter are live;
+4. inspect gateway logs for `target existing session unavailable`, scheduling,
+   or wake failure;
+5. rerun receipts without a status filter.
 
-**Cause:** The terminal event has not yet fired, or the target session has no stored origin.
+Broadcast/fan-out targets that have no existing session are intentionally
+visible-only. The adapter never wakes the creator lane by guess.
 
-**Fix:**
-1. Verify the Kanban task actually reached terminal state (done, blocked, etc.)
-2. Check `kanban_notify_subs` has the correct `user_id=session:...` marker
-3. Run `/self-wake receipts --source-kind kanban` without status filter to see all rows
-4. Run `/self-wake doctor` and check `kanban_db` and `session_resolver`
+Partial fanout is per-target: every successful target can have a receipt even if
+a later target makes `_deliver_result` return or raise an aggregate error. A
+target that never reached the host's per-success helper must not have a wake.
 
-### Subscribe fails silently
+## 7. Diagnose Kanban failures
 
-**Symptom:** Subscribe returns success but no wake occurs.
+### `capability_missing`
 
-**Cause:** The row may be `visible_only` (no session marker), or the Kanban DB is unreachable.
+1. set `self_wake.compat_shim_enabled: true`;
+2. restart the gateway;
+3. require `kanban_wake_capability: ok`.
 
-**Fix:**
-1. Run `/self-wake doctor` — check `kanban_db` status
-2. Re-subscribe with `--dry-run` and inspect `user_id_marker`, `platform`, and
-   `resolved_from_cache`. A `false` there means the target session was not in
-   the current-session cache: the marker was written as given, so a typo'd
-   session key or wrong platform is the usual cause. `error: platform_required`
-   means no platform could be resolved — pass `--platform` explicitly.
-3. If `visible_only: true`, the row was deliberately created with `--force-degraded-visible-only`; re-subscribe without that flag to enable wakes. (Capability-missing hosts fail closed with `error: capability_missing` and never write visible-only rows.)
-4. If the backend reports `kanban_unavailable`, ensure `hermes_cli.kanban_db` is importable in the Hermes process
+### `compat_shim: fail`
 
-### Doctor reports `kanban_db` fail
+A private SessionStore, SessionDB, GatewayRunner, Kanban watcher, or cron seam
+drifted. Update/pin; do not force. Rerun doctor after restart.
 
-**Symptom:** `kanban_db` check shows `fail`.
+### Receipts empty after subscription
 
-**Cause:** `hermes_cli.kanban_db` is not importable, or the board DB is not reachable.
+1. verify the task reached terminal state;
+2. verify `kanban_notify_subs.user_id` contains the expected `session:` marker;
+3. run unfiltered Kanban receipts;
+4. check `kanban_db` and `session_resolver` doctor checks.
 
-**Fix:**
-1. Ensure Hermes is running inside a gateway or CLI process where `hermes_cli` is importable
-2. Check that `~/.hermes/kanban.db` (or the board-specific DB) exists
-3. Restart Hermes / gateway
+## 8. Rollback
 
-### Session resolver empty
+Disable autonomous cron wake:
 
-**Symptom:** `session_resolver` check shows `warn` with 0 sessions.
+```yaml
+cron:
+  wake_agent_on_delivery: false
+```
 
-**Cause:** The active host resolver has no current session entries. On current
-Hermes, the bundled fallback adapter reads the gateway current-session cache at
-`$HERMES_HOME/sessions/sessions.json`; that cache may be missing, empty, or not
-yet populated by the gateway.
+Disable all plugin-owned adapters:
 
-**Fix:**
-1. Ensure at least one gateway session has been created
-2. On current Hermes, check that the gateway current-session cache exists and is a dict keyed by session_key
-3. Restart the gateway to regenerate the cache
-4. If your Hermes install exposes a future native resolver/session-surfaces API, update the plugin adapter instead of treating the cache path as the durable contract
+```yaml
+self_wake:
+  compat_shim_enabled: false
+```
 
-## Rollback
+Then restart from an outside shell. To stop one Kanban subscription, delete its
+notify row; visible-only re-subscribe is not a downgrade mechanism. Existing
+receipts remain durable.
 
-To stop a Kanban task from waking a session:
+## Diagnostics hook
 
-1. Delete the row from `kanban_notify_subs` via the Kanban CLI (or SQL on the
-   board DB). This is the only per-task rollback: **re-subscribing with
-   `--force-degraded-visible-only` does NOT downgrade an existing wake
-   subscription** — the existing `session:`/`session_id:` marker is
-   deliberately preserved (see the marker-preservation regression test), so
-   wakes would keep firing.
-2. Or disable the plugin entirely: `hermes plugins disable self-wake` and restart
-
-Disabling the plugin does not remove core capability or existing subscriptions.
-
-## The pre_llm_call diagnostics hook
-
-The plugin registers one `pre_llm_call` hook. It appends the current
-session's identity to a local diagnostics cache at
-`$HERMES_HOME/self-wake/recent_sessions.json` (atomic writes, bounded to 100
-entries). It returns nothing to the prompt (prompt-cache safe), is not part
-of wake correctness, and is not a canonical ledger — it exists so `doctor`
-and operators can see recently active sessions. Safe to delete at any time.
+The observer-only `pre_llm_call` hook maintains a bounded recent-session cache
+at `$HERMES_HOME/self-wake/recent_sessions.json`. It injects nothing into the
+prompt, is not a correctness ledger, and is safe to delete.
