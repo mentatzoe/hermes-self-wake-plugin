@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "plugin_version": "1.3.0",
+  "surfaces": {
+    "cron_delivery": {
+      "capability": "cron_delivery_wake_v1",
+      "adapter": "self_wake.cron_adapter",
+      "host_commit": "21895bd39d9bc8a1cda307c9b0a0eb6fc98a8844",
+      "stable_private_seams": {
+        "cron.scheduler._deliver_result": "dda5f6f956ec1a6069d2f227ca4d2ba012cfc72600947c82cfca5b468051140f",
+        "cron.scheduler._maybe_mirror_cron_delivery": "6f51d0efb37d1613380fece7e2c7ac7d1035d54825e4c8b45bb2dd843ba16f6c",
+        "cron.scheduler.load_config": "8680b219e570cf6db520ee21c4a043ad29a1cec19525162395e0c4dd15b54dbb",
+        "gateway.session.SessionStore.list_sessions": "1ce4bdb06b080936723a6beaf13eadc76734d1eceb154d033138da322362d5fb"
+      },
+      "runtime_prerequisites": [
+        "gateway.run._gateway_runner_ref is callable and resolves an active runner",
+        "active runner exposes wake_session(payload, source_kind, session_key, session_id, dedupe_key)",
+        "active runner session_store exposes list_sessions"
+      ],
+      "install_model": "transactional two-wrapper exact-source-shape-checked in-process adapter",
+      "wrappers": [
+        "cron.scheduler._deliver_result",
+        "cron.scheduler._maybe_mirror_cron_delivery"
+      ],
+      "restart_required": true
+    }
+  },
+  "retired_artifacts": [
+    "docs/core-patch/0001-internal-session-wake-v1.patch",
+    "docs/core-patch/test-plan.md",
+    "docs/core-patch/upstream-pr.md"
+  ]
+}

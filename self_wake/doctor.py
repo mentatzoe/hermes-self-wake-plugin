@@ -192,7 +192,12 @@ def run_diagnostics(
     warnings: list[str] = []
     remediation: list[str] = []
 
-    # 1. Core capability + version
+    # Resolve the cron policy before capability checks: cron delivery is a
+    # required surface only when the operator has explicitly enabled it.
+    cron_on, cron_detail = _cron_wake_config()
+
+    # 1. Kanban wake capability + version.  This is intentionally named for
+    # the surface it proves; a Kanban-full result says nothing about cron.
     cap = caps.probe_wake_capability(hermes_home)
     cap_category, cap_summary = (
         _classify_capability_failure(cap.get("details", []))
@@ -205,11 +210,19 @@ def run_diagnostics(
     )
     if not cap["available"]:
         cap_detail = f"{cap_detail} — {cap_category}: {cap_summary}"
-    checks.append(_check(
-        "core_capability", "ok" if cap["available"] else "fail",
+    kanban_check = _check(
+        "kanban_wake_capability", "ok" if cap["available"] else "fail",
         cap_detail,
         remediation=(_capability_remediation(cap_category)
                      if not cap["available"] else ""),
+    )
+    checks.append(kanban_check)
+    # Backward-compatible alias for consumers written before capability
+    # surfaces were split.  Its detail explicitly identifies Kanban scope.
+    checks.append(_check(
+        "core_capability", kanban_check["status"],
+        f"kanban surface: {kanban_check['detail']}",
+        remediation=kanban_check["remediation"],
     ))
     if not cap["available"]:
         failures.append(
@@ -217,6 +230,73 @@ def run_diagnostics(
             f"({cap_category}: {cap_summary})"
         )
         remediation.append(_capability_remediation(cap_category))
+
+    # 1a. Cron-delivery wake capability — independent of Kanban mode/source.
+    cron_surface = (cap.get("surfaces") or {}).get("cron_delivery") or {
+        "available": False,
+        "mode": "unavailable",
+        "source": "absent",
+        "reason": "capability surface missing from probe",
+    }
+    cron_available = bool(cron_surface.get("available"))
+    cron_reason = str(cron_surface.get("reason") or "")
+    cron_remediation = (
+        "Install a matching self-wake plugin version, set "
+        "self_wake.compat_shim_enabled: true, and restart the gateway so the "
+        "plugin-owned cron adapter is adopted. If the detail reports "
+        "host_drift, update to a matching self-wake plugin version; do not "
+        "force the private adapter across drift. Re-run self_wake_doctor and "
+        "require cron_delivery source=shim or source=native before relying on "
+        "cron wake."
+    )
+    unknown_policy_remediation = ""
+    if cron_available:
+        cron_status = "ok"
+        cron_cap_detail = (
+            f"mode=full source={cron_surface.get('source', 'absent')} "
+            "capability=cron_delivery_wake_v1"
+        )
+    elif cron_on:
+        cron_status = "fail"
+        cron_cap_detail = (
+            f"mode=unavailable source={cron_surface.get('source', 'absent')} "
+            f"reason={cron_reason or 'cron delivery routing absent'}"
+        )
+        failures.append(f"cron delivery wake unavailable: {cron_reason or 'routing absent'}")
+        remediation.append(cron_remediation)
+    elif cron_on is None:
+        cron_status = "fail"
+        unknown_policy_remediation = (
+            "Config could not be read and cron routing cannot be verified. "
+            "Repair config.yaml so cron.wake_agent_on_delivery can be parsed, "
+            "then restart the gateway and re-run self_wake_doctor."
+        )
+        cron_cap_detail = (
+            f"mode=unavailable source={cron_surface.get('source', 'absent')}; "
+            f"policy unknown ({cron_detail}); cron routing cannot be verified "
+            f"({cron_reason or 'routing absent'})"
+        )
+        failures.append(
+            "cron delivery policy unknown and routing unavailable: "
+            f"{cron_detail}; {cron_reason or 'routing absent'}"
+        )
+        remediation.append(unknown_policy_remediation)
+    else:
+        cron_status = "info"
+        cron_cap_detail = (
+            f"mode=unavailable source={cron_surface.get('source', 'absent')}; "
+            "not required because cron.wake_agent_on_delivery is off"
+        )
+    checks.append(_check(
+        "cron_delivery_capability",
+        cron_status,
+        cron_cap_detail,
+        remediation=(
+            unknown_policy_remediation
+            if cron_on is None and not cron_available
+            else cron_remediation if cron_on and not cron_available else ""
+        ),
+    ))
 
     # 1b. Compat shim status (informational): reports whether the shim is
     # installed, disabled, refused on drift, or not needed (native present).
@@ -324,34 +404,48 @@ def run_diagnostics(
         )
 
     # 5. Cron wake config
-    cron_on, cron_detail = _cron_wake_config()
     if cron_on is None:
-        checks.append(_check("cron_wake_config", "warn", cron_detail))
-        warnings.append("cron.wake_agent_on_delivery not configured (default false)")
+        unknown_config_remediation = (
+            "Config could not be read and cron routing cannot be verified. "
+            "Repair config.yaml so cron.wake_agent_on_delivery can be parsed, "
+            "then restart the gateway and re-run self_wake_doctor."
+        )
+        checks.append(_check(
+            "cron_wake_config", "fail" if not cron_available else "warn",
+            cron_detail,
+            unknown_config_remediation,
+        ))
+        warnings.append(f"cron wake policy unavailable: {cron_detail}")
     else:
         checks.append(_check(
-            "cron_wake_config", "ok" if not cron_on else "warn",
+            "cron_wake_config", "ok",
             f"wake_agent_on_delivery={cron_on}",
-            "Cron delivery wake is opt-in; enable only if autonomous continuation is intended.",
+            "Cron delivery wake is opt-in; enable only if autonomous continuation is intended."
+            if not cron_on else "",
         ))
-        if cron_on:
-            warnings.append("cron.wake_agent_on_delivery=true: cron deliveries will wake target sessions.")
 
     ok = cap["available"] and not any(c["status"] == "fail" for c in checks)
+    effective_mode = (
+        "degraded"
+        if cap["available"] and cron_on is not False and not cron_available
+        else cap["mode"]
+    )
     return {
         "ok": ok,
-        "mode": cap["mode"],
+        "mode": effective_mode,
         "capability": {
             "available": cap["available"],
             "version": cap["version"],
             "required": f"{cap['required_capability']}_v{cap['required_version']}",
+            "surfaces": cap.get("surfaces", {}),
         },
         "checks": checks,
         "failures": failures,
         "warnings": warnings,
         "remediation": remediation,
         "summary": (
-            f"self-wake {cap['mode']} mode; "
+            f"self-wake {effective_mode}; kanban={cap['mode']}; "
+            f"cron_delivery={'full' if cron_available else 'unavailable'}; "
             f"{len(failures)} failure(s), {len(warnings)} warning(s)"
         ),
     }

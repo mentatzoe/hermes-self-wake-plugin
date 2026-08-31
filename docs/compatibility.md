@@ -1,226 +1,166 @@
 # Compatibility
 
-## Capability provider paths and runtime precedence
+## Capability surfaces are independent
 
-The plugin needs the Hermes host capability `internal_session_wake_v1`. It can
-be provided three ways:
+`internal_session_wake_v1` is not one all-or-nothing health bit. The plugin
+reports these surfaces separately:
 
-1. **Compat shim** (`source: "shim"`) — the bundled `self_wake.compat_shim`
-   installs the capability at runtime on vanilla Hermes when the operator opts
-   in (`self_wake.compat_shim_enabled: true`). **This is the portable,
-   shareable path: no core patch required.** The shim is the recommended way to
-   share the plugin across Hermes installs and upgrades.
-2. **Native** (`source: "native"`) — the host has the capability as real
-   code in core. The probe cannot tell (and does not try to tell) how it got
-   there: today that means the operator applied the reference patch under
-   `docs/core-patch/`; if Nous Research ever ships the capability upstream,
-   that reads as "native" too, and the patch retires. Upstream Hermes does
-   not currently ship it.
-3. **Absent** (`source: "absent"`) — neither present. The plugin runs in
-   `inspect_only` mode and fails closed for wake-mutating operations.
+| Surface | Healthy condition | Source |
+|---|---|---|
+| `kanban` | wake primitive, receipt methods/table, session lookup, and Kanban notifier routing all active | `native`, `shim`, or `absent` |
+| `cron_delivery` | successful cron delivery is actively wrapped/routed to `wake_session` | `native`, `shim`, or `absent` |
 
-When both the shim and a native capability are available, **native wins**: the
-shim detects the native capability via the structural probe and does not
-install. This lets an operator enable the shim defensively and then remove it
-once upstream ships the capability natively: the plugin should select the same `full` mode through the same probe contract, and operator workflows stay the same provided the native implementation conforms to `internal_session_wake_v1`.
+The legacy top-level `mode=full` and `available=true` describe **Kanban** for
+backward compatibility. They do not claim cron wake. Doctor derives an effective
+`mode=degraded` when Kanban is full but the cron surface is unavailable and the
+cron policy is either enabled or unreadable/absent. An explicit, readable
+`wake_agent_on_delivery=false` remains healthy.
 
-`self_wake_doctor` and `probe_wake_capability` report the active `source`
-(`native` / `shim` / `absent`) so operators can see which path is providing the
-capability.
+## Version 1.3.0 compatibility matrix
 
-## Compatibility Modes
+| Hermes host | Kanban shim | Cron adapter | Claim |
+|---|---:|---:|---|
+| Exact commit `21895bd39d9bc8a1cda307c9b0a0eb6fc98a8844`, expected private shapes | Supported | Supported; all stable seam digests and both wrappers required | Kanban and configured cron wake supported after restart/adoption |
+| Native host exposing both wake primitives and cron routing | Native wins | Native wins | Supported when all structural probes pass |
+| Host with Kanban wake but no cron adapter/routing | Supported Kanban only | Unavailable | Doctor healthy only when cron wake config is off; `degraded` failure when on |
+| Any host where a Kanban private target drifted | Refused | Diagnosed independently | Kanban fails closed; cron drift never causes a healthy Kanban install to roll back |
+| Any host where a cron stable seam or runtime prerequisite drifted | Kanban remains independently usable | Refused | Cron source absent/degraded; update/pin rather than forcing |
+| No readable session state | Unavailable | Unavailable | `unsupported` |
 
-| Mode | Host State | Behavior |
-|------|-----------|----------|
-| `full` | `internal_session_wake_v1` present (native **or** shim) + receipt table + notifier routing | All tools available |
-| `inspect_only` | Wake primitive absent, session resolver or DB metadata readable | Discovery + partial doctor |
-| `unsupported` | Required files/DBs missing/unreadable | Doctor reports setup issue |
+Current exact seam identity is also recorded in
+`docs/compatibility-manifest.json`:
 
-A `full`-mode determination requires **both** the capability surface
-(`wake_session` + receipts + lookup + table) **and** notifier routing (the
-Kanban notifier actually calls `wake_session` for `session:` markers). This is
-the fail-closed guard against a silent half-wake: a host or shim that provides
-the surface but not the routing is reported as `inspect_only`, so
-`self_wake_subscribe_kanban` refuses to write a marker that would never fire.
+- host commit: `21895bd39d9bc8a1cda307c9b0a0eb6fc98a8844`
+- `cron.scheduler._deliver_result`:
+  `dda5f6f956ec1a6069d2f227ca4d2ba012cfc72600947c82cfca5b468051140f`
+- `cron.scheduler._maybe_mirror_cron_delivery`:
+  `6f51d0efb37d1613380fece7e2c7ac7d1035d54825e4c8b45bb2dd843ba16f6c`
+- `cron.scheduler.load_config`:
+  `8680b219e570cf6db520ee21c4a043ad29a1cec19525162395e0c4dd15b54dbb`
+- `gateway.session.SessionStore.list_sessions`:
+  `1ce4bdb06b080936723a6beaf13eadc76734d1eceb154d033138da322362d5fb`
 
-## Hermes Version Requirements
+`gateway.run._gateway_runner_ref`, the active runner, its `wake_session`
+signature, and active `session_store.list_sessions` are runtime prerequisites.
+Plugin discovery happens before that runner exists, so installation proves the
+two wrapper identities and leaves them adopted; the runtime probe/doctor then
+validates the live prerequisites after `GatewayRunner` construction. The weakref
+target is runtime state, not a stable source identity, and is never source-hashed.
 
-| Feature | Minimum Requirement |
-|---------|-------------------|
-| Plugin install + doctor | Any recent Hermes |
-| Session discovery | A host session resolver. Current bundled adapter reads Hermes' gateway current-session cache (`sessions/sessions.json`) plus `state.db`; that cache path is not a public plugin contract. |
-| Kanban wake subscribe | `internal_session_wake_v1` (native or **shim**) + `session_wake_receipts` table |
-| Receipt inspection | `session_wake_receipts` table (created by shim or native) |
-| Cron wake | Optional core patch only (not provided by the shim) |
-| Send-message mirror wake | Optional core patch only (not provided by the shim) |
+## Provider precedence
+
+For each surface, runtime precedence is `native > shim > absent`.
+
+The bundled opt-in compatibility layer (`self_wake.compat_shim_enabled: true`)
+provides:
+
+- `SessionStore.lookup_by_session_key`;
+- durable receipt methods and `session_wake_receipts` table;
+- `GatewayRunner.wake_session`;
+- Kanban `session:` / `session_id:` notifier routing;
+- the companion `self_wake.cron_adapter` two-wrapper per-success adapter.
+
+The cron adapter is a plugin-owned runtime applicator. It does not edit host
+files. It preflights all stable private seam digests, installs the outer
+`_deliver_result` and per-success `_maybe_mirror_cron_delivery` wrappers as one
+transaction, and restores only wrappers it still owns. Installation proves
+wrapper ownership without requiring the not-yet-constructed active runner;
+doctor proves the live prerequisites after startup.
+Assignment/wrapper-adoption failure rolls back both; uninstall
+preserves any successor wrapper after ownership loss. A successful delivery
+remains successful if optional wake resolution/dispatch fails.
+
+## Cron wake semantics
+
+A wake is attempted only when all are true:
+
+1. the host called `_maybe_mirror_cron_delivery` for a target after that target
+   succeeded (the helper's `enabled` flag may be false);
+2. `cron.wake_agent_on_delivery=true`;
+3. a live gateway runner and running gateway loop exist;
+4. the actual platform/chat/thread/user route resolves unambiguously to one
+   **existing** session.
+
+The adapter never creates a synthetic session and never wakes the job creator
+for an unrelated broadcast target. It uses `job.execution_id` as the fire
+identity; when absent, one nonce is shared by all targets in that one
+`_deliver_result` call. Thus repeated identical output from later executions is
+not deduped forever, while duplicate observation inside one execution is. It
+calls:
+
+```python
+await runner.wake_session(
+    session_key=...,
+    payload=...,
+    source_kind="cron_delivery",
+    dedupe_key=...,
+)
+```
+
+Receipts therefore use `source_kind=cron_delivery` and the same lifecycle as
+Kanban (`requested`, `dispatched`, `queued`, `agent_responded`,
+`dispatched_unconfirmed`, `failure`, or deduped response).
+
+## Fail-closed diagnostics
+
+When cron wake config is on but the surface is absent, doctor emits:
+
+- `ok=false`;
+- `mode=degraded` when Kanban remains full;
+- `cron_delivery_capability: fail`;
+- `source=absent` plus the exact adoption/drift reason;
+- remediation to install the matching plugin, enable the shim, restart the
+  gateway, and require source `shim` or `native` on recheck.
+
+When config is off, an absent cron surface is `info` and does not make doctor
+unhealthy.
+
+When config cannot be read/parsed, or the cron section is absent, policy is
+unknown—not off. If routing is also absent, doctor emits `ok=false`,
+`mode=degraded`, both cron checks fail, and remediation says: “Config could not
+be read and cron routing cannot be verified.”
+
+## Exact-route caveat closed on the supported host
+
+The supported host normally passes the actual mutated thread to the per-success
+helper for dedicated continuable threads and in-channel flattening. One branch
+reports a stale requested thread after `raw_response.thread_fallback`. Because
+the exact `_deliver_result` digest pins that branch and its local variables, the
+wrapper reads that raw-response fact from the immediate host frame and changes
+the wake route to no-thread. If this source shape changes, compatibility fails
+closed; the plugin does not claim exact routing on an unpinned frame shape.
+
+## Active-session caveat
+
+The runtime shim does not replace `gateway/platforms/base.py`. A wake to an
+already-active session follows the host's busy-session behavior and is receipted
+`queued`. On hosts without queued-finalization, a queued receipt can persist
+after processing; confirm the target transcript before classifying it as failed.
 
 ## Session resolver boundary
 
-`self_wake_sessions` is intentionally resolver-neutral at the tool boundary. The
-current implementation includes a fallback adapter for today's Hermes gateway
-current-session cache (`$HERMES_HOME/sessions/sessions.json`) and uses `state.db`
-only for extra title/preview metadata. That cache is active routing state, not a
-canonical history ledger and not a public contract for all Hermes operators. A
-future native resolver or `session_surfaces` adapter should replace the cache
-adapter behind `self_wake.sessions` without changing the operator-facing tool.
+`self_wake_sessions` currently adapts Hermes' current-session cache
+(`$HERMES_HOME/sessions/sessions.json`) and `state.db` metadata. That cache path
+is a private adapter substrate, not the public tool contract. A future native
+resolver can replace it without changing operator commands.
 
-## Fail-Closed Behavior
+## Retired core patch
 
-On hosts without `internal_session_wake_v1` (and without the shim enabled):
+The former `docs/core-patch/0001-internal-session-wake-v1.patch` was based on
+`b7f0c9c...` and does not apply to the supported host. It has been removed so an
+operator cannot mistake stale bytes for a safe installer. No NousResearch PR is
+required or opened. `docs/core-patch/README.md` records the retirement and points
+to the plugin-owned applicator.
 
-- `self_wake_subscribe_kanban` does NOT write `session:` or `session_id:` markers. It returns `capability_missing` with remediation instead.
-- `self_wake_receipts` returns `capability_missing` when the `session_wake_receipts` table is absent.
-- `self_wake_doctor` reports `inspect_only` or `unsupported` mode and lists the specific probes that failed.
-- `self_wake_sessions` works read-only in all modes.
+## Upgrade/adoption gate
 
-On an unsupported host the plugin refuses to write subscription markers the host could not act on. This is enforced at tool-call time, not at plugin load time, so the plugin can still install and report diagnostics.
+After every Hermes or plugin update:
 
-On capable hosts, the same posture continues past the capability gate:
+1. restart the gateway from an outside shell;
+2. run `/self-wake doctor`;
+3. record both surface sources;
+4. if cron wake is enabled, require `cron_delivery_capability: ok`;
+5. trigger a harmless delivery and require a `cron_delivery` receipt plus target
+   session response.
 
-- Subscribing does not guess the delivery platform: it is resolved from the
-  target session's cached origin or its session key; when neither yields one
-  the call fails with `platform_required`. Targets not found in the session
-  cache are flagged (`resolved_from_cache: false`) with a warning.
-- Each wake attempt writes a receipt. A wake delivered into an already-active
-  session is receipted `queued` and may remain so on hosts without the
-  queued-finalization refinement — treat as delivered-unconfirmed, not failed
-  (see the runbook's receipt-status reference).
-- A wake whose post-dispatch bookkeeping fails is recorded as
-  `dispatched_unconfirmed` and is not retried, to avoid re-injecting a
-  payload that already landed; concurrent wakes sharing a dedupe key are
-  deduplicated against in-flight receipts.
-- Re-subscribing a wake row with the visible-only flag preserves the wake
-  marker by design; the response says `downgrade_ignored` and warns that
-  wakes keep firing, rather than implying they stopped.
-
-## The Compat Shim
-
-### What it does
-
-When enabled (`self_wake.compat_shim_enabled: true`) and no native capability
-is present, `self_wake.compat_shim.install_shim` monkeypatches four Hermes
-classes at plugin load time:
-
-| Target | What the shim adds | Why |
-|--------|-------------------|-----|
-| `gateway.session.SessionStore` | `lookup_by_session_key(session_key)` | `wake_session` resolves targets by key. `lookup_by_session_id` already exists on vanilla Hermes. |
-| `hermes_state.SessionDB` | `create_session_wake_receipt` / `update_session_wake_receipt` + creates the `session_wake_receipts` table (idempotent `CREATE TABLE IF NOT EXISTS`) | Durable receipts for each wake, with dedupe. |
-| `gateway.run.GatewayRunner` | `wake_session(*, payload, source_kind, session_key=None, session_id=None, dedupe_key=None)` + helpers | The wake primitive: resolves an existing session, injects a trusted `MessageEvent(internal=True)`, records a receipt. |
-| `gateway.kanban_watchers.GatewayKanbanWatchersMixin` | `_kanban_internal_wake_target` + replaces `_kanban_notifier_watcher` | Routes `session:` / `session_id:` markers through `wake_session` instead of visible `adapter.send`. **This is the wiring that makes wakes actually fire** — without it the plugin would report full but wakes would never happen (silent half-wake). |
-
-For the surfaces the shim provides (Kanban wake, receipts, session lookup),
-the `wake_session` / receipt / lookup implementations are carried verbatim
-(comments trimmed) from `docs/core-patch/0001-internal-session-wake-v1.patch` so
-the shim's behavior matches the core patch. Cron-delivery wake, cross-session message wake, and native active-session queueing are core-patch/native-only: the shim does not provide them.
-
-### Fail-closed on drift
-
-Before installing, the shim verifies each private internal's source shape
-matches what it expects (`_drift_check` in `self_wake/compat_shim.py`):
-
-- `SessionStore.__init__` references `self._entries` and has `_ensure_loaded_locked`.
-- `SessionDB` has `_execute_write` and `get_messages`.
-- `GatewayRunner.__init__` references `session_store`, `_session_db`, `adapters`.
-- `_kanban_notifier_watcher` source contains the vanilla send pattern (`await adapter.send(` + `sub["chat_id"], msg, metadata=metadata`) and does NOT already route wake markers.
-- Extended anchors: every other host internal the vendored code calls is
-  presence-checked — the mixin helpers (`_kanban_advance`, `_kanban_rewind`,
-  `_kanban_unsub`, `_deliver_kanban_artifacts`), the `hermes_cli.kanban_db`
-  function surface, `MessageEvent`'s `internal` field and `MessageType`, and
-  `build_session_key`'s per-user session kwargs. A rename of any of these
-  refuses install instead of failing open inside the notifier tick.
-
-If any target has drifted (renamed, refactored, signature changed), the shim
-**refuses to install** and returns a structured error naming the drifted
-target. The plugin then stays in `inspect_only` mode. There is no silent
-half-wake: the capability probe's `notifier_routing` check is an independent
-second guard.
-
-When drift is detected, `self_wake_doctor` reports a `compat_shim` check with
-status `fail` and remediation pointing at updating the plugin or applying the
-optional core patch.
-
-### Native preference
-
-If the host already has `wake_session` (upstream accepted the patch, or the
-operator applied `docs/core-patch/`), `install_shim` detects the native
-capability and does NOT install. The shim can be disabled by setting
-`self_wake.compat_shim_enabled: false` (the default). When upstream later
-exposes the capability natively, operators disable the shim (or it auto-skips)
-and remove it — no plugin behavior changes because the capability probes are
-identical.
-
-### What the shim does NOT provide
-
-The core patch also refines active-session wake queueing in
-`gateway/platforms/base.py` (internal wakes queue without interrupting a
-running agent). **The shim does not monkeypatch `base.py`.** On vanilla Hermes
-with the shim, a wake to an already-active session is handled by the host's
-default busy-session policy (interrupt or queue per config). The wake event is
-always delivered and receipted — only the active-session queuing semantics
-differ. Cron-delivery wake (`cron.wake_agent_on_delivery`) and send-message
-mirror wake are likewise not wired by the shim; they require the optional core
-patch or a future upstream capability. These gaps are documented honestly
-rather than silently faked.
-
-## Optional Core Patch (reference / upstream candidate)
-
-The patch at `docs/core-patch/0001-internal-session-wake-v1.patch` is an
-**optional reference artifact and upstream PR candidate**, not the required
-install path. It is the cleanest way to provide the capability natively (no
-monkeypatching, full active-session queueing refinement, cron/send-message
-wake) and is what the shim's implementations are derived from.
-
-- **Base commit:** `b7f0c9cd52febc32f4d2fb6205f3291c9e7bcf98`
-- **Source commits:** `3d122a1ac`, `62e0f2e52`, `489720101`, `f45057c48`, `4a9087b67`, `1d5b98c39`
-
-### How to apply (optional)
-
-```bash
-cd $HERMES_HOME/hermes-agent
-git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
-git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
-scripts/run_tests.sh tests/
-```
-
-After applying, the shim auto-detects the native capability and does not
-install (even if `compat_shim_enabled: true`).
-
-## Upgrade Path
-
-1. **Now (portable):** enable the compat shim (`self_wake.compat_shim_enabled: true`). No core patch.
-2. **Optional:** apply `docs/core-patch/` for the full active-session queueing refinement and cron/send-message wake. The shim defers to the native capability.
-3. **Future:** when upstream Hermes ships `internal_session_wake_v1` natively, disable the shim (`compat_shim_enabled: false`) or simply leave it — it auto-skips when native is present.
-
-### Migration from first-cut plugin
-
-If you used the pre-v1 first-cut plugin (`~/.hermes/plugins/self-wake/` version 0.1.0):
-
-- Tool names are preserved (`self_wake_sessions`, `self_wake_subscribe_kanban`, `self_wake_receipts`, `self_wake_doctor`)
-- Existing `kanban_notify_subs` rows are read as-is
-- Visible-only rows (no `session:` marker) will not wake; re-subscribe with a target session to upgrade
-- `session_wake_receipts` data is preserved across patch/shim upgrades
-
-## Capability Probing Limitations
-
-The `version` field reported by `self_wake_doctor` / `probe_wake_capability` is **structural, not a negotiated version**. `version=1` is reported whenever every structural probe passes (including `notifier_routing`). The `source` field distinguishes `native` vs `shim` so operators know which path is active.
-
-A future host whose `wake_session` semantically drifted but kept the same parameter names would still pass the probe and report `version=1`. The probe includes a conservative partial return-shape check that inspects source for `"status"` and `"receipt_id"` key literals, but this can miss drift and declines to fail when source is unavailable. When a real public `hermes_cli.capabilities` (or equivalent) version API lands upstream, the structural probes should be replaced by real version negotiation.
-
-## Shareability
-
-The plugin is shareable to another operator on vanilla Hermes by:
-
-1. `hermes plugins install <repo> --enable`
-2. `self_wake.compat_shim_enabled: true` in `config.yaml`
-3. Restart the gateway.
-
-On partial-native hosts, methods the host already provides are never
-overwritten: the shim fills only the gaps and reports what it skipped in
-`skipped_native_methods` (the notifier pair is always replaced — routing wake
-markers is the point, and the drift check refuses if the native watcher
-already routes them).
-
-No core patch, no Hermes source modification. The shim's drift detection will
-refuse to install (and the plugin will report `inspect_only`) if the target
-Hermes version's private internals have changed — at which point the operator
-updates the plugin or applies the optional core patch.
+Code present on disk without a gateway restart is **not adopted**.

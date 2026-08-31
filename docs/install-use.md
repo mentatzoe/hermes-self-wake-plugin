@@ -1,194 +1,141 @@
 # Install and Use Guide
 
-Step-by-step install for a fresh Hermes setup.
-
 ## Prerequisites
 
-- Hermes Agent installed (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`)
-- The self-wake plugin repo accessible (Git repo)
-- Git available on the host
+- Hermes Agent at a host version listed in `docs/compatibility.md`;
+- Git and Python 3.10+;
+- permission to restart the Hermes gateway from an outside shell.
 
-## 1. Provide the wake capability
-
-The plugin needs the Hermes host capability `internal_session_wake_v1`. You have
-two paths — **the compat shim (portable, no core patch)** is recommended for
-sharing across installs/upgrades; the **optional core patch** provides the full
-native behavior including active-session queueing refinement and cron/send-message wake.
-
-### Option A — compat shim (portable, recommended for sharing)
-
-No core patch required. The plugin installs the capability at runtime when you
-opt in. Just enable it in config (step 4 below):
-
-```yaml
-self_wake:
-  compat_shim_enabled: true
-```
-
-The shim fails closed if Hermes internals drift and defers to a native
-capability when present. For Kanban wake subscriptions its behavior matches
-the core patch. **It does not provide cron-delivery or cross-session message
-wakes — those need the core patch (Option B; upstream Hermes does not
-currently ship the capability)** —
-and active-session handling follows vanilla busy semantics. The capability
-matrix in `docs/compatibility.md` is canonical.
-
-### Option B — optional core patch (native, full behavior)
-
-Apply the reference patch under `docs/core-patch/` for the native capability
-plus active-session queueing refinement and cron/send-message wake:
-
-```bash
-cd $HERMES_HOME/hermes-agent
-git apply --check /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
-git apply /path/to/hermes-self-wake-plugin/docs/core-patch/0001-internal-session-wake-v1.patch
-scripts/run_tests.sh tests/
-```
-
-When the native capability is present, the shim auto-detects it and does not
-install (even if `compat_shim_enabled: true`). You can leave the shim disabled
-(default) on a patched host.
-
-### Option C — neither (inspect-only)
-
-On vanilla upstream Hermes without the shim, the plugin installs and loads in
-`inspect_only` mode. Wake-mutating operations fail closed with
-`capability_missing` until you enable the shim or apply the patch.
-
-See `docs/compatibility.md` for the full version story.
-
-## 2. Install the plugin
+## 1. Install and enable
 
 ```bash
 hermes plugins install https://github.com/mentatzoe/hermes-self-wake-plugin.git --enable
 ```
 
-This clones the repo into `~/.hermes/plugins/self-wake/` and registers it.
-
-## 3. Enable the plugin
-
-`--enable` in step 2 already enabled it. If you installed without the flag:
+For a local checkout/install smoke:
 
 ```bash
-hermes plugins enable self-wake
+python -m venv /tmp/self-wake-venv
+/tmp/self-wake-venv/bin/python -m pip install .
+/tmp/self-wake-venv/bin/python -c 'import self_wake; print(self_wake.__version__)'
 ```
 
-## 4. Add `self_wake` to platform toolsets
+## 2. Configure the plugin-owned compatibility layer
 
-Edit `~/.hermes/config.yaml` and add `self_wake` to the toolsets list for each platform where you want the tools available:
+```yaml
+# ~/.hermes/config.yaml
+self_wake:
+  compat_shim_enabled: true
+
+# Enable only if autonomous continuation after successful cron delivery is
+# intended. Doctor fails if this is true but cron routing is not adopted.
+cron:
+  wake_agent_on_delivery: true
+```
+
+No Hermes source patch is applied. The plugin runtime applicator checks every
+stable private host seam before transactionally installing both cron wrappers;
+startup installation verifies wrapper ownership before the active runner exists.
+After `GatewayRunner` construction, doctor requires the active runner, wake
+signature, and session store without hashing runtime object identity.
+
+Append `self_wake` to existing platform toolsets; do not replace existing
+entries:
 
 ```yaml
 platform_toolsets:
-  default:
-    - web
-    - terminal
-    - file
-    - self_wake
-  discord:
-    - web
-    - terminal
-    - file
-    - self_wake
-  telegram:
-    - web
-    - terminal
-    - file
-    - self_wake
+  default: [web, terminal, file, self_wake]
+  discord: [web, terminal, file, self_wake]
 ```
 
-Add `self_wake` to `platform_toolsets` for each platform where the
-model-facing tools should be available — append to your existing lists, do
-not replace them. The `/self-wake` slash command is registered separately by
-the enabled plugin after restart and does not depend on toolsets.
+The `/self-wake` command is registered independently of model toolsets.
 
-## 5. Restart Hermes / gateway
+## 3. Restart for adoption
 
-Plugin registration and toolset changes require a restart:
+Plugin installation/copying does not alter the already-running process.
+Restart from an outside shell:
 
-- **CLI:** exit and relaunch `hermes`
-- **Gateway:** `hermes gateway restart` or `/restart` in a gateway session
-
-## 6. Verify
-
-Run diagnostics:
-
+```bash
+hermes gateway restart
 ```
+
+Do not rely on a doctor result captured before restart.
+
+## 4. Verify each surface
+
+```text
 /self-wake doctor
 ```
 
-Expected output in `full` mode:
-- `mode: full`
-- `core_capability: ok` (with `source=native` or `source=shim`)
-- `compat_shim: ok` (if using the shim) or `info` (if native/disabled)
-- `session_resolver: ok` (non-zero sessions via host resolver; current adapter uses the gateway current-session cache)
-- `receipt_table: ok`
-- `kanban_db: ok`
+With cron wake enabled, require:
 
-If any check shows `fail`, see `docs/operator-runbook.md` for troubleshooting.
-If `compat_shim` shows `fail` (drift detected), update the plugin or apply the
-optional core patch.
-
-## 7. Resolve a target session
-
+```text
+ok: true
+mode: full
+kanban_wake_capability: ok ... source=shim|native
+cron_delivery_capability: ok ... source=shim|native
+cron_wake_config: ok ... wake_agent_on_delivery=true
 ```
+
+`mode=full` alone is insufficient: it is the backward-compatible Kanban mode.
+If cron is enabled and routing is absent, doctor must say `mode=degraded`,
+`ok=false`, and identify not-adopted or host-drift remediation.
+Unreadable/unparseable or absent cron policy plus absent routing is also
+`mode=degraded`, `ok=false`; unknown policy is never reported as off.
+
+## 5. Current-host smoke
+
+From the plugin checkout:
+
+```bash
+python scripts/current_host_cron_smoke.py \
+  --host-checkout /path/to/hermes-agent-at-21895bd39d
+```
+
+A successful JSON result proves both owned wrappers, real host scheduler delivery, internal wake,
+durable `cron_delivery` receipt, and user/assistant rows in the target existing
+session, using a disposable `HERMES_HOME` and local transport (no external send).
+
+## 6. Subscribe Kanban
+
+```text
 /self-wake sessions --platform discord --chat-id <channel_id>
-```
-
-Or by query:
-
-```
-/self-wake sessions --query "kanban worker"
-```
-
-The output includes `session_key`, `session_id`, `platform`, `chat_id`, `thread_id`, `origin`, and a top-level `resolver_source` object. On current Hermes the resolver source is a fallback adapter over the gateway current-session cache, not a portable public file contract.
-
-## 8. Subscribe a Kanban task to internal wake
-
-Always use `--dry-run` first:
-
-```
 /self-wake subscribe --task-id t_abc123 --session-key "agent:default:discord:thread:..." --dry-run
-```
-
-If the dry-run looks correct, run without `--dry-run`:
-
-```
 /self-wake subscribe --task-id t_abc123 --session-key "agent:default:discord:thread:..."
 ```
 
-The subscription writes `kanban_notify_subs.user_id = session:<session_key>` so that terminal events wake the target session internally.
+## 7. Inspect receipts
 
-## 9. Verify via receipts
-
-After a terminal event fires:
-
-```
+```text
 /self-wake receipts --source-kind kanban
+/self-wake receipts --source-kind cron_delivery
 ```
 
-Read the statuses, not just the count: `agent_responded` is the strongest
-outcome; `queued` means delivered into an already-active session, and on
-hosts without queued-finalization it can persist after the agent picks the
-event up — confirm in the target session's transcript before treating it as
-a failure. Filter with `--status` only after the unfiltered view.
+`agent_responded` is the strongest outcome. `queued` means delivered to a busy
+session; confirm its transcript when queued-finalization is unavailable.
 
 ## Upgrade
-
-To upgrade the plugin:
 
 ```bash
 cd ~/.hermes/plugins/self-wake
 git pull
 hermes plugins enable self-wake
-# Restart Hermes / gateway
+hermes gateway restart
 ```
 
-## Uninstall
+Then rerun doctor and the harmless receipt-backed canary. A host update can
+invalidate the exact adapter shape even when the plugin files survived.
 
-```bash
-hermes plugins disable self-wake
-# Remove from platform_toolsets in config.yaml
-# Restart Hermes / gateway
+## Rollback
+
+```yaml
+self_wake:
+  compat_shim_enabled: false
+cron:
+  wake_agent_on_delivery: false
 ```
 
-Disabling the plugin stops operator tools/hooks/commands but does not remove the core capability or existing subscriptions.
+Then restart the gateway. Disabling the plugin does not delete existing Kanban
+subscriptions or receipt rows; remove/upgrade subscriptions separately.
+
+The old core patch under `docs/core-patch/` is retired and must not be applied.

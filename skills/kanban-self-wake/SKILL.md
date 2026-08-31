@@ -1,115 +1,54 @@
 ---
 name: kanban-self-wake
-description: "Operational guide for Hermes Kanban session-wake subscriptions."
-version: "1.2.2"
-metadata:
-  hermes:
-    tags: [kanban, self-wake, subscriptions, wake-routing]
+description: "Use when Kanban or configured cron delivery must wake an existing Hermes session with durable receipts."
 ---
 
-# Kanban Self-Wake
+# Kanban and Cron Self-Wake
 
-Operational guide for using the self-wake plugin to subscribe Hermes agent sessions to Kanban terminal events via internal wake routing.
+## Health gate
 
-## Key Invariant
+Run `self_wake_doctor` before creating or trusting wake routes.
 
-For Kanban wake to work, the `kanban_notify_subs.user_id` must be set to `session:<session_key>` or `session_id:<session_id>`. A visible-only row (platform/chat/thread) does NOT wake the agent.
+- `kanban_wake_capability: ok` proves Kanban.
+- `cron_delivery_capability: ok` proves configured cron delivery.
+- Top-level `mode=full` is Kanban-scoped and never proves cron.
+- If `cron.wake_agent_on_delivery=true` and cron routing is absent, doctor must
+  report `ok=false`, `mode=degraded`, and restart/update remediation.
+- If cron policy is unreadable/unparseable or absent and routing is absent,
+  policy is unknown (not off): require `ok=false`, `mode=degraded`, and exact
+  config-read/routing-verification remediation.
 
-## Prerequisites
+## Kanban workflow
 
-- Hermes with `internal_session_wake_v1`, provided **either** by:
-  - the bundled **compat shim** (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch; covers **Kanban wakes, receipts, session lookup**), **or**
-  - the **optional core patch** under `docs/core-patch/` (full behavior: adds cron-delivery wake, cross-session message wake, and active-session queueing refinement; upstream Hermes does not currently ship the capability)
-- `self-wake` plugin installed and enabled
-- `self_wake` toolset added to platform_toolsets in config.yaml
-- Hermes/gateway restarted after enablement
+1. Resolve the exact target with `self_wake_sessions`.
+2. Dry-run `self_wake_subscribe_kanban`.
+3. Subscribe the task with an exact `session_key` or `session_id`.
+4. After a terminal event, inspect `self_wake_receipts(source_kind="kanban")`.
+5. Treat `agent_responded` as strongest evidence; confirm persistent `queued`
+   receipts in the target transcript.
 
-## Quick Reference
+## Cron workflow
 
-### Check capability and health
+1. Set `self_wake.compat_shim_enabled: true`.
+2. Set `cron.wake_agent_on_delivery: true` only when autonomous continuation is intended.
+3. Restart the gateway from an outside shell.
+4. Require `cron_delivery_capability: ok`, source `shim` or `native`.
+5. Trigger a harmless delivery to an existing session.
+6. Require a durable receipt with `source_kind=cron_delivery` and target response.
 
-```
-/self-wake doctor
-```
+The plugin supports the exact host and two-wrapper seam set listed in
+`docs/compatibility.md`. Both wrapper markers and live wake prerequisites must
+be adopted. Host drift must fail closed; never force a private adapter across a
+digest mismatch. The
+old core patch is retired and is not remediation.
 
-Expected `full` mode for wake to work. `inspect_only` means the host capability is missing.
+## Failure interpretation
 
-### Resolve a target session
+- `capability_missing`: adapter disabled/not adopted or host unsupported.
+- `host_drift`: install a matching plugin or pin the supported host, then restart.
+- no cron receipt after visible delivery: verify per-surface doctor result and
+  exact platform/chat/thread-to-existing-session match.
+- `dispatched_unconfirmed`: do not retry blindly; injection already occurred.
+- broadcast with no existing target session: intentionally visible-only.
 
-```
-/self-wake sessions --platform discord --chat-id <channel_id>
-```
-
-Or by query:
-
-```
-/self-wake sessions --query "kanban worker"
-```
-
-### Subscribe a Kanban task
-
-Dry-run first:
-
-```
-/self-wake subscribe --task-id <task_id> --session-key <session_key> --dry-run
-```
-
-Then commit:
-
-```
-/self-wake subscribe --task-id <task_id> --session-key <session_key>
-```
-
-Optional `--reset-cursor` to replay already-claimed events (use with care).
-
-### Inspect receipts
-
-```
-/self-wake receipts --source-kind kanban
-```
-
-Read the statuses, not just the count: `agent_responded` is the strongest
-outcome; `queued` means delivered into an already-active session, and on
-hosts without queued-finalization it can persist after the agent picks the
-event up — confirm in the target session's transcript before treating it as
-a failure. Filter with `--status` only after the unfiltered view.
-
-### Subscribe by session_id
-
-If you only know the session_id:
-
-```
-/self-wake subscribe --task-id <task_id> --session-id <session_id>
-```
-
-The plugin resolves to a session_key when possible; otherwise writes a `session_id:<id>` marker.
-
-## Failure Modes
-
-### `capability_missing`
-
-The host lacks `internal_session_wake_v1`. Enable the compat shim (`self_wake.compat_shim_enabled: true` in config.yaml — portable, no core patch), apply the optional core patch from `docs/core-patch/`, or upgrade Hermes. The plugin never writes wake markers on an unsupported host.
-
-### `ambiguous_session`
-
-Filters matched multiple sessions. Pass an explicit `session_key` or `session_id` to disambiguate.
-
-### `kanban_unavailable`
-
-The Kanban DB backend (`hermes_cli.kanban_db`) is not importable. This usually means the plugin is running outside a Hermes gateway/CLI process. Restart Hermes.
-
-### `chat_id_required`
-
-The target session has no stored origin and no `chat_id` was passed explicitly. Pass `chat_id` (and `thread_id` if needed) on the command line.
-
-## Compatibility
-
-The plugin requires Hermes host capability `internal_session_wake_v1`, see `docs/compatibility.md` in the plugin repo for the capability matrix; do not restate it here.
-
-## See Also
-
-- Plugin repo `docs/operator-runbook.md` — full operational procedures
-- Plugin repo `docs/compatibility.md` — capability sources, shim internals, drift handling, upgrade path
-- Plugin repo `docs/install-use.md` — fresh install steps (shim + optional core-patch)
-- Plugin repo `docs/core-patch/` — **optional** reference / upstream-candidate core patch artifact
-- Plugin repo `self_wake/compat_shim.py` — the compat shim implementation
+See `docs/operator-runbook.md` and `docs/compatibility.md` in the plugin repo.

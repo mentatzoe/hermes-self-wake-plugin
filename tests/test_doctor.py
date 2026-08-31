@@ -59,9 +59,150 @@ def test_doctor_check_names_cover_required_surfaces(full_capability,
     """Doctor checks cover the design's required diagnostic surfaces."""
     result = doctor.run_diagnostics(backend=kanban_backend)
     names = {c["name"] for c in result["checks"]}
-    for required in ("core_capability", "session_resolver", "receipt_table",
-                     "kanban_db", "cron_wake_config"):
+    for required in ("kanban_wake_capability", "cron_delivery_capability",
+                     "session_resolver", "receipt_table", "kanban_db",
+                     "cron_wake_config"):
         assert required in names
+
+
+def test_doctor_shim_only_cannot_false_positive_cron_wake(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    """Regression: Kanban full/source=shim is not cron-delivery health."""
+    from self_wake import capabilities as caps
+    from self_wake import compat_shim
+
+    monkeypatch.setattr(compat_shim, "is_installed", lambda: True)
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {"probe": "cron_delivery_routing", "available": False,
+                 "source": "absent", "reason": "plugin adapter not adopted"},
+    )
+    monkeypatch.setattr(doctor, "_cron_wake_config", lambda: (True, "set"))
+
+    result = doctor.run_diagnostics(backend=kanban_backend)
+    assert result["mode"] == "degraded"
+    assert result["ok"] is False
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "fail"
+    assert "source=absent" in cron_cap["detail"]
+    assert "restart" in cron_cap["remediation"].lower()
+    assert any("cron delivery wake unavailable" in f for f in result["failures"])
+    assert "kanban=full" in result["summary"]
+    assert "cron_delivery=unavailable" in result["summary"]
+
+
+def test_doctor_native_full_cron_path_is_healthy_when_enabled(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    monkeypatch.setattr(doctor, "_cron_wake_config", lambda: (True, "set"))
+    result = doctor.run_diagnostics(backend=kanban_backend)
+    assert result["mode"] == "full"
+    assert result["ok"] is True
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "ok"
+    assert "source=native" in cron_cap["detail"]
+
+
+def test_doctor_config_off_is_healthy_without_cron_adapter(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    from self_wake import capabilities as caps
+
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {"probe": "cron_delivery_routing", "available": False,
+                 "source": "absent", "reason": "plugin adapter not adopted"},
+    )
+    monkeypatch.setattr(doctor, "_cron_wake_config", lambda: (False, "set"))
+    result = doctor.run_diagnostics(backend=kanban_backend)
+    assert result["mode"] == "full"
+    assert result["ok"] is True
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "info"
+    assert "not required" in cron_cap["detail"]
+
+
+def test_doctor_unreadable_cron_policy_and_absent_routing_is_degraded(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    from self_wake import capabilities as caps
+
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {"probe": "cron_delivery_routing", "available": False,
+                 "source": "absent", "reason": "plugin adapter not adopted"},
+    )
+    monkeypatch.setattr(
+        doctor, "_cron_wake_config",
+        lambda: (None, "config unreadable: YAML parse error at line 7"),
+    )
+
+    result = doctor.run_diagnostics(backend=kanban_backend)
+
+    assert result["ok"] is False
+    assert result["mode"] == "degraded"
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "fail"
+    config = next(c for c in result["checks"] if c["name"] == "cron_wake_config")
+    assert config["status"] == "fail"
+    exact = "config could not be read and cron routing cannot be verified"
+    assert exact in config["remediation"].lower()
+    assert exact in cron_cap["remediation"].lower()
+    assert "policy is off" not in result["summary"].lower()
+
+
+def test_doctor_absent_cron_policy_and_absent_routing_is_degraded(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    from self_wake import capabilities as caps
+
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {"probe": "cron_delivery_routing", "available": False,
+                 "source": "absent", "reason": "plugin adapter not adopted"},
+    )
+    monkeypatch.setattr(
+        doctor, "_cron_wake_config", lambda: (None, "cron section absent"),
+    )
+
+    result = doctor.run_diagnostics(backend=kanban_backend)
+
+    assert result["ok"] is False
+    assert result["mode"] == "degraded"
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "fail"
+    assert "cannot be verified" in cron_cap["detail"].lower()
+
+
+def test_doctor_host_drift_gives_exact_adapter_remediation(
+        full_capability, state_db_with_receipts, kanban_backend, hermes_home,
+        monkeypatch):
+    from self_wake import capabilities as caps
+
+    monkeypatch.setattr(
+        caps,
+        "_probe_cron_delivery_routing",
+        lambda: {"probe": "cron_delivery_routing", "available": False,
+                 "source": "absent", "reason": "host_drift: _deliver_result sha mismatch"},
+    )
+    monkeypatch.setattr(doctor, "_cron_wake_config", lambda: (True, "set"))
+    result = doctor.run_diagnostics(backend=kanban_backend)
+    cron_cap = next(c for c in result["checks"]
+                    if c["name"] == "cron_delivery_capability")
+    assert cron_cap["status"] == "fail"
+    assert "host_drift" in cron_cap["detail"]
+    assert "matching self-wake plugin version" in cron_cap["remediation"]
+    assert "restart the gateway" in cron_cap["remediation"]
 
 
 # --------------------------------------------------------------------------- #
