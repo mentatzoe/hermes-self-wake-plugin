@@ -335,13 +335,18 @@ def _shim_lookup_session_entry_for_wake(self, *, session_key=None, session_id=No
     return self.session_store.lookup_by_session_key(session_key)
 
 
-def _shim_wake_message_ids_after(self, session_id, *, previous_max_id, payload):
+async def _await_result(value):
+    """Support both SessionDB and the host's AsyncSessionDB proxy."""
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _shim_wake_message_ids_after(self, session_id, *, previous_max_id, payload):
     """Best-effort lookup of the injected user row and assistant row."""
     session_db = getattr(self, "_session_db", None)
     if session_db is None:
         return None, None
     try:
-        messages = session_db.get_messages(session_id)
+        messages = await _await_result(session_db.get_messages(session_id))
     except Exception:
         logger.debug("failed to inspect wake messages for %s", session_id, exc_info=True)
         return None, None
@@ -376,6 +381,7 @@ async def _shim_wake_session(
     session_key: Optional[str] = None,
     session_id: Optional[str] = None,
     dedupe_key: Optional[str] = None,
+    defer_if_busy: bool = False,
 ) -> dict:
     """Inject a trusted internal event into an existing gateway session.
 
@@ -409,7 +415,7 @@ async def _shim_wake_session(
     except Exception:
         origin_snapshot = None
 
-    receipt, created = session_db.create_session_wake_receipt(
+    receipt, created = await _await_result(session_db.create_session_wake_receipt(
         source_kind=source_kind,
         target_session_key=entry.session_key,
         target_session_id=entry.session_id,
@@ -418,7 +424,7 @@ async def _shim_wake_session(
         payload_preview=payload_preview,
         payload_bytes=payload_bytes,
         dedupe_key=dedupe_key,
-    )
+    ))
     if not created:
         existing_status = str(receipt.get("status") or "")
         retryable = existing_status == "failure"
@@ -435,20 +441,20 @@ async def _shim_wake_session(
                 "target_session_key": entry.session_key,
                 "target_session_id": entry.session_id,
             }
-        receipt = session_db.update_session_wake_receipt(
+        receipt = await _await_result(session_db.update_session_wake_receipt(
             int(receipt["id"]), status="requested", error=""
-        ) or receipt
+        )) or receipt
 
     receipt_id = int(receipt["id"])
     adapter = self.adapters.get(entry.origin.platform)
     if adapter is None:
         error = f"adapter unavailable for {entry.origin.platform.value}"
-        row = session_db.update_session_wake_receipt(receipt_id, status="failure", error=error)
+        row = await _await_result(session_db.update_session_wake_receipt(receipt_id, status="failure", error=error))
         return {"status": "failure", "error": error, "receipt_id": receipt_id, "receipt": row}
 
     before_max_id = 0
     try:
-        existing_messages = session_db.get_messages(entry.session_id)
+        existing_messages = await _await_result(session_db.get_messages(entry.session_id))
         before_max_id = max((int(m.get("id") or 0) for m in existing_messages), default=0)
     except Exception:
         logger.debug("failed to snapshot pre-wake message id", exc_info=True)
@@ -487,6 +493,14 @@ async def _shim_wake_session(
                 target_already_active = True
                 break
 
+    if defer_if_busy and (target_already_active or getattr(self, "_draining", False)):
+        # Keep native events in the durable board until an idle receiver can
+        # take them, rather than acknowledging an unverified in-memory queue.
+        error = "receiver busy or draining; retry pending"
+        row = await _await_result(session_db.update_session_wake_receipt(
+            receipt_id, status="failure", error=error))
+        return {"status": "failure", "error": error, "receipt_id": receipt_id, "receipt": row}
+
     from gateway.platforms.base import MessageEvent, MessageType
     event = MessageEvent(
         text=payload,
@@ -495,6 +509,8 @@ async def _shim_wake_session(
         internal=True,
         message_id=f"internal-wake:{receipt_id}",
     )
+    # A handoff is data, never a command, approval or interrupt response.
+    event.allow_gateway_control = False
     try:
         setattr(event, "_hermes_internal_wake_receipt_id", receipt_id)
         if dedupe_key:
@@ -504,11 +520,11 @@ async def _shim_wake_session(
         pass
 
     try:
-        session_db.update_session_wake_receipt(receipt_id, status="dispatched", dispatched=True)
+        await _await_result(session_db.update_session_wake_receipt(receipt_id, status="dispatched", dispatched=True))
         await adapter.handle_message(event)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        row = session_db.update_session_wake_receipt(receipt_id, status="failure", error=error)
+        row = await _await_result(session_db.update_session_wake_receipt(receipt_id, status="failure", error=error))
         logger.warning("internal wake failed for %s: %s", entry.session_key, error)
         return {"status": "failure", "error": error, "receipt_id": receipt_id, "receipt": row}
 
@@ -518,9 +534,9 @@ async def _shim_wake_session(
     # that already happened.
     try:
         if target_already_active:
-            row = session_db.update_session_wake_receipt(
+            row = await _await_result(session_db.update_session_wake_receipt(
                 receipt_id, status="queued", dispatched=True
-            )
+            ))
             return {
                 "status": "queued",
                 "receipt_id": receipt_id,
@@ -537,17 +553,17 @@ async def _shim_wake_session(
                     break
         if task is not None and task is not asyncio.current_task():
             await asyncio.shield(task)
-        injected_id, assistant_id = self._wake_message_ids_after(
+        injected_id, assistant_id = await _await_result(self._wake_message_ids_after(
             entry.session_id, previous_max_id=before_max_id, payload=payload
-        )
+        ))
         status = "agent_responded" if assistant_id is not None else "dispatched"
-        row = session_db.update_session_wake_receipt(
+        row = await _await_result(session_db.update_session_wake_receipt(
             receipt_id,
             status=status,
             responded=assistant_id is not None,
             injected_message_id=injected_id,
             assistant_message_id=assistant_id,
-        )
+        ))
         return {
             "status": status,
             "receipt_id": receipt_id,
@@ -561,8 +577,8 @@ async def _shim_wake_session(
         error = f"{type(exc).__name__}: {exc}"
         row = None
         try:
-            row = session_db.update_session_wake_receipt(
-                receipt_id, status="dispatched_unconfirmed", error=error)
+            row = await _await_result(session_db.update_session_wake_receipt(
+                receipt_id, status="dispatched_unconfirmed", error=error))
         except Exception:  # noqa: BLE001
             logger.warning("could not record dispatched_unconfirmed for receipt %s", receipt_id)
         logger.warning("internal wake dispatched but bookkeeping failed for %s: %s",
@@ -580,17 +596,30 @@ def _shim_kanban_internal_wake_target(self, sub: dict):
     if marker.startswith("session:"):
         target = marker.split(":", 1)[1].strip()
         return ("session_key", target) if target else None
+    if sub.get("delivery_mode") in {"wake", "notify+wake"}:
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        metadata = sub.get("delivery_metadata") or {}
+        source = SessionSource(
+            platform=Platform(sub["platform"]), chat_id=sub["chat_id"],
+            chat_type=sub.get("chat_type") or metadata.get("chat_type") or "group",
+            thread_id=sub.get("thread_id") or None,
+            user_id=sub.get("user_id"), user_id_alt=sub.get("user_id_alt"),
+            profile=sub.get("profile") or None,
+            scope_id=sub.get("scope_id") or None,
+        )
+        # The host owns grouping/profile rules. Resolve the subscription
+        # destination, never task.session_id (worker/creator provenance).
+        return "session_key", self._session_key_for_source(source)
     return None
 
 
 async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
-    """Canonical patched kanban notifier watcher (from docs/core-patch/).
+    """Consume legacy markers and native delivery modes without losing wakes.
 
-    Identical to vanilla ``_kanban_notifier_watcher`` except that a
-    ``session:<key>`` / ``session_id:<id>`` marker in ``sub["user_id"]`` routes
-    the terminal event through ``self.wake_session`` instead of a visible
-    ``adapter.send``.  Carried verbatim (comments trimmed) so behavior matches
-    the core patch.
+    Native wake failures retain the subscription and retry cursor. Completed
+    rows remain subscribed for later blocked/reopened transitions.
     """
     import asyncio
     import os
@@ -697,6 +726,7 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
             deliveries = await asyncio.to_thread(_collect)
             for d in deliveries:
                 sub = d["sub"]
+                native_wake = sub.get("delivery_mode") in {"wake", "notify+wake"}
                 task = d["task"]
                 board_slug = d.get("board")
                 platform_str = (sub["platform"] or "").lower()
@@ -767,6 +797,8 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                                 "source_kind": "kanban",
                                 "dedupe_key": dedupe_key,
                             }
+                            if native_wake:
+                                wake_kwargs["defer_if_busy"] = True
                             if target_kind == "session_id":
                                 wake_kwargs["session_id"] = target_value
                             else:
@@ -778,13 +810,15 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                                 "kanban notifier: internally woke %s for %s event on %s (receipt=%s)",
                                 target_value, kind, sub["task_id"], result.get("receipt_id"),
                             )
-                        else:
-                            await adapter.send(sub["chat_id"], msg, metadata=metadata)
+                        if wake_target is None or sub.get("delivery_mode") == "notify+wake":
+                            send_result = await adapter.send(sub["chat_id"], msg, metadata=metadata)
+                            if getattr(send_result, "success", True) is False:
+                                raise RuntimeError("adapter send reported failure")
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
                             )
-                        if kind == "completed" and not internal_wake_delivery:
+                        if kind == "completed" and (not internal_wake_delivery or sub.get("delivery_mode") == "notify+wake"):
                             try:
                                 await self._deliver_kanban_artifacts(
                                     adapter=adapter,
@@ -806,7 +840,7 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                             "kanban notifier: send failed for %s on %s (attempt %d/%d): %s",
                             sub["task_id"], platform_str, fails, MAX_SEND_FAILURES, exc,
                         )
-                        if fails >= MAX_SEND_FAILURES:
+                        if fails >= MAX_SEND_FAILURES and not native_wake:
                             logger.warning(
                                 "kanban notifier: dropping subscription %s on %s after %d consecutive send failures",
                                 sub["task_id"], platform_str, fails,
@@ -819,7 +853,7 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                         break
                 else:
                     await asyncio.to_thread(self._kanban_advance, sub, d["cursor"], board_slug)
-                    task_terminal = task and task.status in {"done", "archived"}
+                    task_terminal = task and task.status == "archived"
                     if task_terminal:
                         await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
         except Exception as exc:
