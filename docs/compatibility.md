@@ -132,7 +132,13 @@ closed; the plugin does not claim exact routing on an unpinned frame shape.
 
 ## Active-session caveat
 
-The runtime shim does not replace `gateway/platforms/base.py`. A wake to an
+For ordinary native `delivery_mode=wake` / `notify+wake` rows, see
+[Native Kanban return repair](native-kanban-return.md). This separately
+exact-host-gated path uses confirmed injection evidence, keeps uncertain
+receipts pending and defers busy receivers. Structural doctor health alone
+does not establish native delivery.
+
+The legacy runtime shim does not replace `gateway/platforms/base.py`. A wake to an
 already-active session follows the host's busy-session behavior and is receipted
 `queued`. On hosts without queued-finalization, a queued receipt can persist
 after processing; confirm the target transcript before classifying it as failed.
