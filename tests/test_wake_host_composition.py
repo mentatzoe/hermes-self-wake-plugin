@@ -39,26 +39,9 @@ def test_async_session_db_records_and_dedupes(wake_world):
     assert len(adapter.handled) == 1
 
 
-def test_busy_native_wake_remains_retryable_until_idle(wake_world):
-    runner, adapter, entry, db = wake_world
-    adapter._active_sessions[entry.session_key] = object()
-
-    def attempt():
-        return asyncio.run(shim._shim_wake_session(
-            runner, payload="native terminal probe", source_kind="kanban",
-            session_key=entry.session_key, dedupe_key="native-busy",
-            defer_if_busy=True))
-
-    busy = attempt()
-    assert busy["status"] == "failure"
-    assert "busy" in busy["error"]
-    assert not adapter.handled
-    assert _receipt_status(db, busy["receipt_id"]) == "failure"
-    adapter._active_sessions.clear()
-    idle = attempt()
-    assert idle["receipt_id"] == busy["receipt_id"]
-    assert idle["status"] == "dispatched"
-    assert len(adapter.handled) == 1
+# Native busy-to-idle coverage lives in test_native_admission.py. Its
+# receiver persists the exact event ID; this legacy transport fake only
+# appends to `handled`, which cannot establish native acceptance.
 
 
 def test_task_payload_cannot_act_as_gateway_control(wake_world):

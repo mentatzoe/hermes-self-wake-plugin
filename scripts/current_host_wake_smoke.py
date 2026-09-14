@@ -74,7 +74,7 @@ def main():
             async def responder(event):
                 actual = store.get_or_create_session(event.source)
                 observed.append((actual.session_id, event.allow_gateway_control))
-                db.append_message(actual.session_id, "user", event.text)
+                db.append_message(actual.session_id, "user", event.text, platform_message_id=event.message_id)
                 db.append_message(actual.session_id, "assistant", "Local deterministic probe response; no model called.")
                 return None
 
@@ -96,7 +96,7 @@ def main():
             second = await wake()
             messages = db.get_messages(entry.session_id)
             result = {
-                "ok": first["status"] == "agent_responded" and second["status"] == "deduped" and observed == [(entry.session_id, False)] and (busy_retained is not False),
+                "ok": first["status"] == "dispatched" and first.get("injected_message_id") is not None and second["status"] == "deduped" and observed == [(entry.session_id, False)] and [m["role"] for m in messages] == ["user", "assistant"] and (busy_retained is not False),
                 "probe": "real-host-wake-transport-with-local-responder",
                 "live_gateway_test": False, "kanban_board_consumer_test": False,
                 "busy_then_idle": busy_retained,
