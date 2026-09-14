@@ -14,6 +14,13 @@ in `delivery_metadata`. Persisted `scope_id`, `slack_team_id` or `team_id` wins;
 builder and profile-aware adapter selector remain authoritative. Worker
 `task.session_id` is never a parent destination.
 
+An unstamped stored source belongs to the active process profile, including
+named single-profile gateways; it is not unconditionally `default`. Explicit
+foreign-profile names remain distinct. The native notification body uses the
+immutable event fields, never the current task title/assignee/result, so task
+edits cannot poison a busy retry or an injected-but-unacknowledged replay with
+a payload-hash conflict. Conflicting direct calls still fail closed.
+
 A native wake requires an existing session whose stored route matches the
 subscription. Each attempt pins that current session ID and key and passes
 `gateway_session_strict` metadata. Native subscriptions follow a logical parent

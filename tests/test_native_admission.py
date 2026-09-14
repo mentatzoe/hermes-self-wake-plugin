@@ -249,3 +249,23 @@ def test_transcript_evidence_comes_from_target_profile_store(native):
     result = asyncio.run(attempt(native))
     assert result["status"] == "dispatched"
     assert selected and set(selected) == {entry.session_key}
+
+
+@pytest.mark.parametrize("requested,accepted", [("beta", True), ("other", False), ("default", False)])
+def test_unstamped_source_uses_active_profile_not_literal_default(native, requested, accepted):
+    runner, adapter, entry, db, messages = native
+    @dataclasses.dataclass
+    class ProfileOrigin(type(entry.origin)):
+        profile: str | None = None
+
+        def to_dict(self):
+            return dict(super().to_dict(), profile=self.profile)
+
+    entry.origin = ProfileOrigin()
+    runner._active_profile_name = lambda: "beta"
+    runner.config = SimpleNamespace(multiplex_profiles=False)
+    expected = dataclasses.replace(entry.origin, profile=requested)
+    result = asyncio.run(native_wake.wake(runner, payload="event", source_kind="kanban",
+        session_key=entry.session_key, dedupe_key="named", expected_source=expected))
+    assert (result["status"] == "dispatched") is accepted
+    assert bool(adapter.handled) is accepted

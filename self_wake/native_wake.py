@@ -163,7 +163,11 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
             actual = getattr(source, name, None) or None
             expected = getattr(expected_source, name, None) or None
             if name == "profile":
-                actual, expected = actual or "default", expected or "default"
+                # An unstamped source belongs to the active process profile,
+                # including named single-profile gateways. Explicit default
+                # is not an alias for a different named active profile.
+                active_profile = getattr(runner, "_active_profile_name", lambda: "default")() or "default"
+                actual, expected = actual or active_profile, expected or active_profile
             if actual != expected:
                 return {"status": "failure", "error": f"subscription origin mismatch: {name}"}
     entry = SimpleNamespace(session_key=original.session_key, session_id=original.session_id, origin=source)

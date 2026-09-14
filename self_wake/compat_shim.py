@@ -790,7 +790,10 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                 title = (task.title if task else sub["task_id"])[:120]
                 for ev in d["events"]:
                     kind = ev.kind
-                    who = (task.assignee if task and task.assignee else None)
+                    # Receipt identity is the immutable event. Re-rendering
+                    # mutable task fields on retry would change its hash and
+                    # permanently conflict with the original receipt.
+                    who = (task.assignee if not native_wake and task and task.assignee else None)
                     tag = f"@{who} " if who else ""
                     if kind == "completed":
                         handoff = ""
@@ -801,11 +804,12 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                             lines = payload_summary.strip().splitlines()
                             h = lines[0][:200] if lines else payload_summary[:200]
                             handoff = f"\n{h}"
-                        elif task and task.result:
+                        elif not native_wake and task and task.result:
                             lines = task.result.strip().splitlines()
                             r = lines[0][:160] if lines else task.result[:160]
                             handoff = f"\n{r}"
-                        msg = f"✔ {tag}Kanban {sub['task_id']} done — {title}{handoff}"
+                        title_suffix = "" if native_wake else f" — {title}"
+                        msg = f"✔ {tag}Kanban {sub['task_id']} done{title_suffix}{handoff}"
                     elif kind == "blocked":
                         reason = ""
                         if ev.payload and ev.payload.get("reason"):

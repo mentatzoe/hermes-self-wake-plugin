@@ -264,3 +264,26 @@ def test_partial_native_signature_is_not_called_with_unknown_keyword(world):
     tick(world)
     assert state["cursor"] == 1
     assert not state["sent"]
+
+
+@pytest.mark.parametrize("kind", ["completed", "blocked", "crashed", "gave_up", "timed_out"])
+@pytest.mark.parametrize("stage", ["busy", "injected_without_ack"])
+def test_native_retry_payload_ignores_mutable_task_state(world, kind, stage, monkeypatch):
+    runner, state, task, event = world
+    event.kind = kind
+    event.payload = {}
+    payloads = []
+    def lost_ack(*args):
+        raise OSError("simulated cursor acknowledgement failure")
+    monkeypatch.setattr(shim, "_advance_native", lost_ack)
+    async def busy(**kwargs):
+        payloads.append((kwargs["dedupe_key"], kwargs["payload"]))
+        return {"status": "pending" if stage == "busy" else "dispatched"}
+    runner.wake_session = busy
+    tick(world)
+    task.title, task.result, task.assignee = "Renamed", "Changed result", "new-owner"
+    runner._running = True
+    tick(world)
+    assert len(payloads) == 2
+    assert payloads[0] == payloads[1]
+    assert state["cursor"] == 1
