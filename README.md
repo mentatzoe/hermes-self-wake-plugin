@@ -3,13 +3,22 @@
 [![CI](https://github.com/mentatzoe/hermes-self-wake-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/mentatzoe/hermes-self-wake-plugin/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Portable internal session wake for Hermes Kanban and cron delivery.**
+**Resume existing Hermes conversations after cron, Kanban and explicit session messages.**
 
 A visible platform notification tells the human that something happened. An
 internal wake resumes the existing Hermes session that owns the work, injects
 the event through its live adapter path, and writes a durable receipt.
 
-Version 1.3.0 provides two independently diagnosed capability surfaces:
+Version 1.4.0 adds durable cron/message retries, native SQLite routing discovery,
+and owned-response receipt links on the supported current host. Native terminal
+completion stays native. Start with [the current installation and verification
+packet](docs/current-paths.md); it supersedes the historical 1.3.0 details below.
+
+`hermes self-wake send --session-id ID --dedupe-key KEY --file FILE` queues an
+explicit same-profile message. It does not change ordinary `hermes send`.
+The operator grant and a running single-profile receiver are required.
+
+The older compatibility layer provides two independently diagnosed surfaces:
 
 - **Kanban:** terminal events for `session:` / `session_id:` subscriptions call
   `GatewayRunner.wake_session`.
@@ -63,6 +72,14 @@ running gateway must restart before doctor can see the new wrapper.
 
 ## Current exact-host support
 
+Version 1.4.0 targets Hermes `dcbf5b71bc65fc6f7168c601bc04e84b22f912cd`.
+It interprets confirmed live text-delivery evidence, preserves actual topic
+routing and queues the wake durably. Multiplexed inboxes and unproven media,
+timeout, relay or new-thread routes fail closed. Released-host probes do not
+establish support for all current releases. See [current paths](docs/current-paths.md).
+
+### Historical 1.3.0 host
+
 The 1.3.0 cron adapter supports Hermes commit
 `21895bd39d9bc8a1cda307c9b0a0eb6fc98a8844`, with exact
 stable private callable SHA-256 values:
@@ -100,11 +117,11 @@ Model-facing equivalents are `self_wake_sessions`,
 
 ```bash
 python -m pytest tests -q
-python scripts/current_host_cron_smoke.py \
-  --host-checkout /path/to/hermes-agent-at-21895bd39d
+python scripts/current_host_paths_smoke.py \
+  --host-checkout /path/to/supported-hermes-agent
 ```
 
-The current-host smoke requires both owned wrappers, then uses the real Hermes cron scheduler, delivery router,
+The current-host smoke uses the real Hermes cron scheduler, delivery router,
 session/event types, and a disposable `SessionDB`; only external platform I/O is
 replaced with a deterministic local transport. It proves successful delivery →
 internal wake → durable `cron_delivery` receipt → target existing session user
@@ -113,6 +130,7 @@ and assistant rows.
 ## Documentation
 
 - `docs/install-use.md` — install and adoption
+- `docs/current-paths.md` — 1.4.0 Home packet, limits and all live acceptance checks
 - `docs/operator-runbook.md` — operations, receipts, diagnosis, rollback
 - `docs/compatibility.md` — canonical surface/source matrix and drift behavior
 - `docs/architecture.md` — authoritative boundary and trust model

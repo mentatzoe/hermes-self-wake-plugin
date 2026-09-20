@@ -424,10 +424,25 @@ def run_diagnostics(
             if not cron_on else "",
         ))
 
+    from . import outbox, cron_adapter
+    try:
+        message_surface = outbox.diagnostics(hermes_home)
+    except Exception as exc:
+        message_surface = {"available": False, "enabled": True, "mode": "unavailable", "error": str(exc)}
+    cap.setdefault("surfaces", {})["session_message"] = message_surface
+    cap["surfaces"]["cron_delivery"]["last_observation"] = cron_adapter.status().get("last_observation", {})
+    if message_surface["enabled"] and not message_surface["available"]:
+        checks.append(_check("session_message", "fail", message_surface.get("reason") or "Receiver inbox consumer is not running",
+                             "Restart the gateway after installing self-wake; verify the live doctor, not a CLI process."))
+        failures.append("session-message receiver is not running")
+    else:
+        checks.append(_check("session_message", "ok" if message_surface["enabled"] else "info",
+                             f"mode={message_surface['mode']}"))
     ok = cap["available"] and not any(c["status"] == "fail" for c in checks)
     effective_mode = (
         "degraded"
-        if cap["available"] and cron_on is not False and not cron_available
+        if cap["available"] and ((cron_on is not False and not cron_available)
+                                 or (message_surface["enabled"] and not message_surface["available"]))
         else cap["mode"]
     )
     return {
@@ -446,6 +461,7 @@ def run_diagnostics(
         "summary": (
             f"self-wake {effective_mode}; kanban={cap['mode']}; "
             f"cron_delivery={'full' if cron_available else 'unavailable'}; "
+            f"session_message={message_surface['mode']}; "
             f"{len(failures)} failure(s), {len(warnings)} warning(s)"
         ),
     }

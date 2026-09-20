@@ -383,6 +383,7 @@ async def _shim_wake_session(
     session_id: Optional[str] = None,
     dedupe_key: Optional[str] = None,
     defer_if_busy: bool = False,
+    wait_for_completion: bool = True,
     expected_source=None,
 ) -> dict:
     """Inject a trusted internal event into an existing gateway session.
@@ -399,7 +400,8 @@ async def _shim_wake_session(
         from .native_wake import wake
         return await wake(self, payload=payload, source_kind=source_kind,
                           session_key=session_key, session_id=session_id,
-                          dedupe_key=dedupe_key, expected_source=expected_source)
+                          dedupe_key=dedupe_key, expected_source=expected_source,
+                          wait_for_completion=wait_for_completion)
 
     session_db = getattr(self, "_session_db", None)
     if session_db is None:
@@ -651,6 +653,28 @@ def _advance_native(sub, cursor, board):
 
 
 async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
+    """Own the durable inbox alongside _kanban_internal_wake_target/wake_session routing."""
+    import asyncio
+    from .outbox import watch
+    tasks = [asyncio.create_task(_shim_kanban_events_watcher(self, interval)),
+             asyncio.create_task(watch(self, interval))]
+    self._self_wake_inbox_task = tasks[1]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Admission owners contain only routing/DB work, never a model turn.
+        # Join them before the host closes its stores during shutdown.
+        admissions = list(getattr(self, "_self_wake_admissions", ()))
+        if admissions:
+            await asyncio.gather(*admissions, return_exceptions=True)
+        if getattr(self, "_self_wake_inbox_task", None) is tasks[1]:
+            self._self_wake_inbox_task = None
+
+
+async def _shim_kanban_events_watcher(self, interval: float = 5.0) -> None:
     """Consume legacy markers and native delivery modes without losing wakes.
 
     Native wake failures retain the subscription and retry cursor. Completed
@@ -853,6 +877,8 @@ async def _shim_kanban_notifier_watcher(self, interval: float = 5.0) -> None:
                                 if not any(p.name == "defer_if_busy" or p.kind == p.VAR_KEYWORD for p in params):
                                     raise RuntimeError("native wake requires receipt-bound admission; host signature unsupported")
                                 wake_kwargs["defer_if_busy"] = True
+                                if any(p.name == "wait_for_completion" or p.kind == p.VAR_KEYWORD for p in params):
+                                    wake_kwargs["wait_for_completion"] = False
                                 if not str(sub.get("user_id") or "").startswith(("session:", "session_id:")):
                                     wake_kwargs["expected_source"] = _native_subscription_source(self, sub)
                             if target_kind == "session_id":

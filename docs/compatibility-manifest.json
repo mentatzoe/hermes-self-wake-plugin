@@ -1,6 +1,14 @@
 {
   "schema_version": 2,
-  "plugin_version": "1.3.0",
+  "plugin_version": "1.4.0",
+  "current_host": {
+    "commit": "dcbf5b71bc65fc6f7168c601bc04e84b22f912cd",
+    "cron_delivery_sha256": "af69ac49a6a127bb3275867ce47e79522f6e795f8ff0a5d1ddd1be8dd9e4e01a",
+    "admission_manifest": "self_wake/native_wake.py:HOST_METHODS",
+    "inbox_mode": "single-profile gateway only",
+    "operator_packet": "docs/current-paths.md",
+    "live_adoption_verified": false
+  },
   "surfaces": {
     "cron_delivery": {
       "capability": "cron_delivery_wake_v1",

@@ -1,5 +1,11 @@
 # Install and Use Guide
 
+For version 1.4.0 on the current host, use [current paths](current-paths.md).
+That packet includes the exact-commit installer, explicit session-message CLI,
+native background checks and Home's live acceptance steps. The guide below
+records the older 1.3.0 host and its legacy cron probe; it is not the current
+host's verification procedure.
+
 ## Prerequisites
 
 - Hermes Agent at a host version listed in `docs/compatibility.md`;

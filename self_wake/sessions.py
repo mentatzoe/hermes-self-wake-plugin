@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # larger explicit limit (bounded by _safe_int to a hard cap).
 DEFAULT_LIMIT = 10
 HARD_LIMIT = 50
-CURRENT_RESOLVER_SOURCE = "current_session_cache_adapter"
+CURRENT_RESOLVER_SOURCE = "native_routing_index_with_legacy_fallback"
 
 
 def _current_session_cache_file(hermes_home: str | Path | None = None) -> Path:
@@ -89,6 +89,39 @@ def read_current_session_cache(hermes_home: str | Path | None = None) -> dict[st
 def _origin(entry: dict[str, Any]) -> dict[str, Any]:
     origin = entry.get("origin")
     return origin if isinstance(origin, dict) else {}
+
+
+def read_routing_index(hermes_home: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """Read the scoped native index without constructing a mutating store.
+
+    Match native load precedence: legacy entries fill gaps; SQLite wins for
+    the same key. Never enumerate another profile's routing scope.
+    """
+    entries = {k: v for k, v in read_current_session_cache(hermes_home).items()
+               if not k.startswith("_")}
+    db = _state_db(hermes_home)
+    if not db.exists():
+        return entries
+    try:
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT session_key,entry_json FROM gateway_routing WHERE scope=?",
+                (str((_hermes_home(hermes_home) / "sessions").resolve()),),
+            ).fetchall()
+        finally:
+            conn.close()
+        for key, raw in rows:
+            entries.pop(str(key), None)
+            try:
+                entry = json.loads(raw)
+                if isinstance(entry, dict) and entry.get("session_id"):
+                    entries[str(key)] = dict(entry, session_key=str(key))
+            except (ValueError, TypeError):
+                pass  # Never revive a stale mirror row over an invalid primary.
+    except sqlite3.Error as exc:
+        logger.debug("self-wake: native routing index unavailable: %s", exc)
+    return entries
 
 
 def _entry_summary(session_key: str, entry: dict[str, Any],
@@ -179,7 +212,7 @@ def query_host_sessions(hermes_home: str | Path | None = None,
     substring over the entry summary JSON. Returns at most ``limit`` summaries
     (bounded by HARD_LIMIT), most-recently-updated first.
     """
-    sessions = read_current_session_cache(hermes_home)
+    sessions = read_routing_index(hermes_home)
     limit = _safe_int(limit, DEFAULT_LIMIT)
     ids = [str(e.get("session_id") or "") for e in sessions.values()]
     title_meta = _load_session_titles(ids, hermes_home)
@@ -239,7 +272,7 @@ def resolve_target_session(
     carrying just the key (the caller may intentionally target a key not yet
     seen in this profile).
     """
-    sessions = read_current_session_cache(hermes_home)
+    sessions = read_routing_index(hermes_home)
     session_key = (session_key or "").strip()
     session_id = (session_id or "").strip()
 
@@ -248,7 +281,11 @@ def resolve_target_session(
         db_meta = _load_session_titles(
             [str(entry.get("session_id") or "")], hermes_home).get(
             str(entry.get("session_id") or ""), {})
-        return [_entry_summary(session_key, entry, db_meta)]
+        if _matches(session_key, entry, db_meta, session_id=session_id,
+                    session_key=session_key, platform=platform, chat_id=chat_id,
+                    thread_id=thread_id, query=query):
+            return [_entry_summary(session_key, entry, db_meta)]
+        return []
 
     matches = query_host_sessions(hermes_home, session_id=session_id,
                                   session_key=session_key or None, platform=platform,

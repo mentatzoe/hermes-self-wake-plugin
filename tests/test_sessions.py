@@ -22,7 +22,7 @@ def test_read_current_session_cache_missing_file(tmp_path, monkeypatch):
 
 def test_resolver_source_names_cache_as_adapter_not_contract(hermes_home):
     source = sessions.resolver_source()
-    assert source["kind"] == "current_session_cache_adapter"
+    assert source["kind"] == "native_routing_index_with_legacy_fallback"
     assert source["contract"] == "host session resolver adapter; cache path is not public API"
     assert source["current_session_cache"].endswith("sessions/sessions.json")
 

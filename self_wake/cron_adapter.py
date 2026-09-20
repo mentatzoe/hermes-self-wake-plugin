@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 ADAPTER_CAPABILITY = "cron_delivery_wake_v1"
 SUPPORTED_HOSTS = {
+    "af69ac49a6a127bb3275867ce47e79522f6e795f8ff0a5d1ddd1be8dd9e4e01a": {
+        "commit": "dcbf5b71bc65fc6f7168c601bc04e84b22f912cd",
+        "function": "cron.scheduler._deliver_result",
+        "durable": True,
+    },
     # Exact inspect.getsource(_deliver_result) identity on the dispatched
     # current-host checkout.  The commit is operator-facing provenance; the
     # source digest is the runtime adoption gate and works for installed source
@@ -58,6 +63,7 @@ _install_report: dict[str, Any] = {
     "installed": False,
     "reason": "not_attempted",
 }
+_last_observation: dict[str, Any] = {}
 
 
 def _function_digest(fn: Callable[..., Any]) -> str:
@@ -119,6 +125,12 @@ def probe(*, module=None) -> dict[str, Any]:
                 "reason": "cron.scheduler.load_config missing",
             }
         prerequisites = _operational_prerequisites()
+        if prerequisites.get("ok") and getattr(fn, "_self_wake_cron_durable", False):
+            task = getattr(_active_gateway_runner(), "_self_wake_inbox_task", None)
+            if task is None or task.done():
+                prerequisites = {"ok": False, "reason": "durable cron inbox consumer is not running"}
+            elif getattr(getattr(_active_gateway_runner(), "config", None), "multiplex_profiles", False):
+                prerequisites = {"ok": False, "reason": "durable cron inbox requires a single-profile gateway"}
         if not prerequisites.get("ok"):
             return {
                 "available": False,
@@ -362,6 +374,15 @@ def _entry_matches_target(entry: Any, target: dict[str, Any]) -> bool:
     origin = getattr(entry, "origin", None)
     if origin is None:
         return False
+    if target.get("_durable"):
+        for field in ("scope_id", "user_id_alt", "profile"):
+            actual = getattr(origin, field, None) or ""
+            expected = target.get(field) or ""
+            if field == "profile":
+                actual = actual or target.get("_active_profile", "default")
+                expected = expected or target.get("_active_profile", "default")
+            if actual != expected:
+                return False
     return (
         _platform_value(getattr(origin, "platform", ""))
         == str(target.get("platform") or "").lower()
@@ -407,7 +428,10 @@ def _resolve_wake_target(
             continue
         session_key = str(getattr(entry, "session_key", "") or "").strip()
         if session_key:
-            matches.append({"session_key": session_key})
+            match = {"session_key": session_key}
+            if target.get("_durable"):
+                match["session_id"] = str(getattr(entry, "session_id", "") or "")
+            matches.append(match)
             continue
         session_id = str(getattr(entry, "session_id", "") or "").strip()
         if session_id:
@@ -448,14 +472,14 @@ def _schedule_wake(
         or uuid.uuid4().hex
     )
     material = "\0".join(
-        [job_id, fire_identity, platform, chat_id, thread_id, content]
+        [job_id, fire_identity, platform, chat_id, thread_id, str(target.get("user_id") or "")]
     )
     digest = hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
     payload = (
         f"Internal wake from cron delivery: cron job '{job_name}' (id: {job_id}) "
         f"delivered output into this existing {platform} session. Consume the "
         "delivered cron result and continue if follow-through is needed.\n\n"
-        f"Delivered content:\n{content}"
+        f"Original job output (attachments may have separate delivery results):\n{content}"
     )
     kwargs = {
         **wake_target,
@@ -466,6 +490,15 @@ def _schedule_wake(
             f"{thread_id}:{digest}"
         ),
     }
+    if target.get("_durable"):
+        from .outbox import enqueue
+        lookup = {"session_key": wake_target["session_key"]} if wake_target.get("session_key") else wake_target
+        entry = runner._lookup_session_entry_for_wake(**lookup)
+        if (entry is None or entry.session_id != wake_target.get("session_id")
+                or not _entry_matches_target(entry, target)):
+            return {"status": "skipped", "reason": "target session changed"}
+        return enqueue(entry=entry, payload=payload, source_kind="cron_delivery",
+                       dedupe_key=kwargs["dedupe_key"])
     coro = wake_fn(**kwargs)
     try:
         running = asyncio.get_running_loop()
@@ -544,6 +577,40 @@ def _log_wake_outcome(job: dict[str, Any], target: dict[str, Any], result: dict[
         )
 
 
+def current_delivery_target(values, platform, chat_id, thread_id, user_id):
+    """Interpret the pinned host's confirmed live text branch, not its mirror flag.
+
+    Timeouts, bare success, media-only effects, relay routing and newly created
+    continuation threads lack the exact existing-target evidence this bridge
+    needs. They remain visible deliveries, but never become guessed wakes.
+    """
+    if values.get("delivered") is not True or values.get("timed_out") is not False:
+        return None, "delivery unconfirmed or standalone; no wake"
+    if not str(values.get("cleaned_delivery_content") or "").strip():
+        return None, "media-only delivery has no confirmed text route"
+    if not values.get("delivered_message_id"):
+        return None, "delivery lacks a message identifier"
+    if values.get("opened_thread_id"):
+        return None, "new continuation thread is not an existing destination"
+    if getattr(values.get("transport"), "is_relay", False):
+        return None, "relay destination identity is not exposed by this seam"
+    origin = values.get("origin") or {}
+    if (origin.get("platform") != platform or str(origin.get("chat_id") or "") != str(chat_id)):
+        return None, "non-origin delivery requires an explicit existing-session message"
+    actual_thread = values.get("route_thread_id")
+    metadata = values.get("route_metadata") or {}
+    if platform == "telegram" and metadata.get("direct_messages_topic_id"):
+        actual_thread = str(metadata["direct_messages_topic_id"])
+    raw = values.get("send_raw_response")
+    if isinstance(raw, dict) and raw.get("thread_fallback"):
+        actual_thread = None
+    target = {"platform": platform, "chat_id": chat_id, "thread_id": actual_thread,
+              "user_id": user_id, "_durable": True}
+    for field in ("scope_id", "user_id_alt", "profile"):
+        target[field] = origin.get(field)
+    return target, ""
+
+
 def _make_mirror_wrapper(original: Callable[..., Any], scheduler: Any):
     """Observe the host's per-target post-success helper without changing it."""
     del scheduler
@@ -613,6 +680,16 @@ def _make_mirror_wrapper(original: Callable[..., Any], scheduler: Any):
                 target["thread_id"] = None
         finally:
             del frame
+        if context.get("durable"):
+            global _last_observation
+            target, reason = current_delivery_target(
+                caller_locals, str(platform_name), str(chat_id), thread_id, user_id)
+            if target is None:
+                _last_observation = {"status": "skipped", "reason": reason}
+                logger.warning("cron wake skipped: %s", reason)
+                return result
+            runner = _active_gateway_runner()
+            target["_active_profile"] = getattr(runner, "_active_profile_name", lambda: "default")()
         try:
             wake_result = _schedule_wake(
                 job=job,
@@ -623,9 +700,11 @@ def _make_mirror_wrapper(original: Callable[..., Any], scheduler: Any):
                 fire_identity=str(context.get("fire_identity") or ""),
             )
             _log_wake_outcome(job, target, wake_result)
+            _last_observation = wake_result
         except Exception as exc:  # noqa: BLE001
             # Optional wake can never retroactively fail a successful visible
             # delivery or escape through the host's mirror helper.
+            _last_observation = {"status": "failure", "reason": str(exc)}
             logger.warning(
                 "Job '%s': cron delivery wake observer raised for %s:%s: %s",
                 job.get("id", "?"), platform_name, chat_id, exc,
@@ -641,6 +720,10 @@ def _make_mirror_wrapper(original: Callable[..., Any], scheduler: Any):
 
 def _make_delivery_wrapper(original: Callable[..., Any], scheduler: Any):
     """Carry one delivery call's content/fire identity to per-target success."""
+    try:
+        durable = bool(SUPPORTED_HOSTS.get(_function_digest(original), {}).get("durable"))
+    except (OSError, TypeError):
+        durable = False
     def _wrapped(job: dict, content: str, adapters=None, loop=None):
         fire_identity = (
             str(job.get("execution_id") or "").strip() or f"call-{uuid.uuid4().hex}"
@@ -651,6 +734,7 @@ def _make_delivery_wrapper(original: Callable[..., Any], scheduler: Any):
             "loop": loop,
             "fire_identity": fire_identity,
             "wake_enabled": _wake_enabled(scheduler),
+            "durable": durable,
         })
         try:
             return original(job, content, adapters=adapters, loop=loop)
@@ -661,6 +745,7 @@ def _make_delivery_wrapper(original: Callable[..., Any], scheduler: Any):
     _wrapped.__doc__ = getattr(original, "__doc__", None)
     setattr(_wrapped, "_self_wake_cron_delivery_v1", True)
     setattr(_wrapped, "_self_wake_cron_outer_v2", True)
+    setattr(_wrapped, "_self_wake_cron_durable", durable)
     setattr(_wrapped, "_self_wake_original", original)
     return _wrapped
 
@@ -809,4 +894,4 @@ def uninstall() -> dict[str, Any]:
 
 
 def status() -> dict[str, Any]:
-    return dict(_install_report)
+    return {**_install_report, "last_observation": dict(_last_observation)}
