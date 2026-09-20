@@ -6,9 +6,8 @@ depends on a host-owned ``internal_session_wake_v1`` capability.
 
 The capability can be provided three ways (runtime precedence is always native > shim > absent):
 
-1. **Native** — upstream Hermes ships ``internal_session_wake_v1``, or the
-   operator applies the optional reference core patch under
-   ``docs/core-patch/``.  No monkeypatching.
+1. **Native** — Hermes supplies the required capability. The old reference
+   core patch is retired and is not an installation route.
 2. **Compat shim** — the bundled ``self_wake.compat_shim`` installs the
    capability at runtime on vanilla Hermes when the operator opts in
    (``self_wake.compat_shim_enabled: true``).  This is the portable/shareable
@@ -29,7 +28,7 @@ from pathlib import Path
 
 from . import cli, compat_shim, schemas, tools
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +83,10 @@ def register(ctx) -> None:
         description="Resolve and verify Hermes self-wake routes.",
         args_hint="sessions|subscribe|receipts|doctor ...",
     )
+    if callable(getattr(ctx, "register_cli_command", None)):
+        from . import send_cli
+        ctx.register_cli_command("self-wake", "Send to an existing session and inspect its receipt",
+                                 send_cli.setup, handler_fn=send_cli.handler)
 
     skills_dir = Path(__file__).resolve().parent.parent / "skills"
     skill_md = skills_dir / "kanban-self-wake" / "SKILL.md"

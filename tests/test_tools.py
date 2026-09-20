@@ -18,7 +18,7 @@ def test_sessions_handler_returns_json(hermes_home):
     assert result["tool"] == "self_wake_sessions"
     assert result["count"] == 1
     assert "capability_mode" in result
-    assert result["resolver_source"]["kind"] == "current_session_cache_adapter"
+    assert result["resolver_source"]["kind"] == "native_routing_index_with_legacy_fallback"
     assert "sessions_file" not in result
 
 

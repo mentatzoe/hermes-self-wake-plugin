@@ -1,5 +1,19 @@
 # Compatibility
 
+## Version 1.4.0 current host
+
+The current host is `dcbf5b71bc65fc6f7168c601bc04e84b22f912cd`.
+Cron and explicit session messages use a durable single-profile inbox and the
+receipt-bound native admission path. Doctor reports `session_message` alongside
+the other surfaces and requires a running inbox consumer. Native terminal
+completion remains host-owned. See [current paths](current-paths.md) for the
+full contract, tested limits, released-host refusals and installation packet.
+
+The matrix and semantics below describe the retained historical 1.3.0 adapter,
+not a claim that its old host pin covers the current integration. Current
+session discovery reads the scoped SQLite routing index first; the optional
+JSON mirror fills only absent keys.
+
 ## Capability surfaces are independent
 
 `internal_session_wake_v1` is not one all-or-nothing health bit. The plugin

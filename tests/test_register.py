@@ -82,4 +82,8 @@ def test_register_hooks_returns_none(hermes_home):
 
 
 def test_version_is_set():
-    assert __version__ == "1.3.0"
+    import re
+    root = Path(__file__).resolve().parents[1]
+    assert f'version = "{__version__}"' in (root / "pyproject.toml").read_text()
+    assert f'version: "{__version__}"' in (root / "plugin.yaml").read_text()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)

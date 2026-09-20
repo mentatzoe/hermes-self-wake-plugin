@@ -35,3 +35,5 @@ htmlcov/
 *.bak
 *.tmp
 uv.lock
+exports/
+.ruff_cache/

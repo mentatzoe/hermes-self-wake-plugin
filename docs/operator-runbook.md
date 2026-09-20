@@ -122,7 +122,7 @@ function object.
 
 Fix:
 
-1. verify installed plugin is version 1.3.0;
+1. use [the current 1.4.0 packet](current-paths.md) for the modernized host; retain this older checklist only for the historical 1.3.0 host;
 2. verify `self_wake.compat_shim_enabled: true`;
 3. restart the gateway from an outside shell;
 4. rerun doctor and require cron source `shim` or `native`.

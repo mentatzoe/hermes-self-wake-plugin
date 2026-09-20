@@ -89,13 +89,16 @@ async def claim(db, *, entry, payload, source_kind, dedupe_key):
     return await call(db._execute_write(write))
 
 
-async def transition(db, receipt_id, token, status, *, error=None, injected_id=None):
+async def transition(db, receipt_id, token, status, *, error=None, injected_id=None, assistant_id=None):
     """Only the owning attempt may change a receipt. dispatching is not ack."""
     def write(conn):
         cursor = conn.execute(
-            "UPDATE session_wake_receipts SET status=?,updated_at=?,error=?,injected_message_id=? "
-            "WHERE id=? AND EXISTS (SELECT 1 FROM self_wake_claims WHERE receipt_id=? AND token=?)",
-            (status, time.time(), error, injected_id, receipt_id, receipt_id, token))
+            "UPDATE session_wake_receipts SET status=?,updated_at=?,error=?,injected_message_id=?,"
+            "assistant_message_id=?,responded_at=CASE WHEN ? IS NOT NULL THEN ? ELSE responded_at END "
+            "WHERE id=? AND EXISTS (SELECT 1 FROM self_wake_claims WHERE receipt_id=? AND token=?) "
+            "AND NOT (? IN ('pending','failure') AND injected_message_id IS NOT NULL)",
+            (status, time.time(), error, injected_id, assistant_id, assistant_id,
+             time.time(), receipt_id, receipt_id, token, status))
         return cursor.rowcount == 1
     return await call(db._execute_write(write))
 
@@ -105,6 +108,58 @@ async def exact_injection(db, session_id, receipt_id):
     marker = f"internal-wake:{receipt_id}"
     matches = [m for m in messages if m.get("role") == "user" and m.get("platform_message_id") == marker]
     return int(matches[0]["id"]) if len(matches) == 1 else None
+
+
+async def exact_response(db, session_id, injected_id, final_text=None):
+    """Link only a unique persisted row matching this owned handler's result."""
+    if not isinstance(final_text, str) or not final_text.strip():
+        return None
+    messages = await call(db.get_messages(session_id))
+    responses = []
+    for message in sorted(messages, key=lambda m: int(m["id"])):
+        if int(message["id"]) <= injected_id:
+            continue
+        if message.get("role") == "user":
+            break
+        if (message.get("role") == "assistant" and message.get("content")
+                and not message.get("tool_calls") and message["content"] == final_text):
+            responses.append(int(message["id"]))
+    return responses[0] if len(responses) == 1 else None
+
+
+def observe_response(adapter, event):
+    """Observe the owned handler result without changing normal handler behavior."""
+    state = getattr(adapter, "_self_wake_response_observer", None)
+    if state is None:
+        original = adapter._message_handler
+        state = {"original": original, "events": {}}
+        async def handler(incoming):
+            result = await original(incoming)
+            if state["events"].get(id(incoming)) is incoming:
+                text = result if isinstance(result, str) else getattr(incoming, "_streamed_final_response", None)
+                incoming._self_wake_final_response = text
+            return result
+        state["wrapper"] = handler
+        adapter._self_wake_response_observer = state
+        adapter._message_handler = handler
+    state["events"][id(event)] = event
+    def release():
+        state["events"].pop(id(event), None)
+        if not state["events"]:
+            if adapter._message_handler is state["wrapper"]:
+                adapter._message_handler = state["original"]
+            if getattr(adapter, "_self_wake_response_observer", None) is state:
+                del adapter._self_wake_response_observer
+    return release
+
+
+async def reconcile_injection(db, receipt_id, injected_id):
+    """Persist proven injection before acknowledging replay; never invent a reply."""
+    def write(conn):
+        conn.execute("UPDATE session_wake_receipts SET status='dispatched',injected_message_id=?,updated_at=? "
+                     "WHERE id=? AND status IN ('dispatching','pending')",
+                     (injected_id, time.time(), receipt_id))
+    await call(db._execute_write(write))
 
 
 class AdmissionUncertain(RuntimeError):
@@ -126,7 +181,7 @@ def admit(runner, adapter, entry, source, event):
     profile = getattr(source, "profile", None)
     if runner._authorization_adapter(source.platform, profile) is not adapter:
         raise RuntimeError("target adapter changed before admission")
-    if getattr(runner, "_draining", False):
+    if getattr(runner, "_draining", False) or not getattr(runner, "_running", True):
         raise RuntimeError("receiver draining; retry pending")
     task = getattr(adapter, "_session_tasks", {}).get(entry.session_key)
     if (entry.session_key in getattr(adapter, "_active_sessions", {})
@@ -146,7 +201,23 @@ def admit(runner, adapter, entry, source, event):
     return task
 
 
-async def wake(runner, *, payload, source_kind, session_key=None, session_id=None, dedupe_key=None, expected_source=None):
+async def wake(runner, *, wait_for_completion=True, **kwargs):
+    """Cancellation cannot separate a committed claim from its admission owner."""
+    admissions = getattr(runner, "_self_wake_admissions", None)
+    if admissions is None:
+        admissions = runner._self_wake_admissions = set()
+    owner = asyncio.create_task(_wake_owned(runner, **kwargs))
+    admissions.add(owner)
+    owner.add_done_callback(admissions.discard)
+    result = await asyncio.shield(owner)
+    if isinstance(result, asyncio.Task):
+        if wait_for_completion:
+            return await asyncio.shield(result)
+        return {"status": "pending", "error": "owned turn admitted; receipt settlement pending"}
+    return result
+
+
+async def _wake_owned(runner, *, payload, source_kind, session_key=None, session_id=None, dedupe_key=None, expected_source=None, expected_session_id=None, require_authorization=False):
     from gateway.platforms.base import MessageEvent, MessageType
     db = getattr(runner, "_session_db", None)
     if db is None:
@@ -154,6 +225,8 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
     original = runner._lookup_session_entry_for_wake(session_key=session_key, session_id=session_id)
     if original is None or original.origin is None:
         return {"status": "failure", "error": "target session or origin missing"}
+    if expected_session_id is not None and original.session_id != expected_session_id:
+        return {"status": "failure", "error": "target session changed"}
     # Copy immutable identity values before the first async DB operation:
     # SessionEntry objects in the store can be mutated in place by a reset.
     from types import SimpleNamespace
@@ -185,13 +258,14 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
     if row["payload_hash"] != hashlib.sha256(payload.encode()).hexdigest() or row["source_kind"] != source_kind:
         return dict(result, status="failure", error="dedupe key conflicts with existing payload/source")
     if token is None:
-        if row["status"] == "dispatched" and row.get("injected_message_id"):
+        if row["status"] in {"dispatched", "agent_responded"} and row.get("injected_message_id"):
             return dict(result, status="deduped")
         # Recovery is read-only: an ambiguous attempt may finish after caller
         # cancellation or process interruption. Never infer success from age.
         if row["status"] in {"dispatching", "pending"}:
             injected = await exact_injection(target_db, row["target_session_id"], rid)
             if injected is not None:
+                await reconcile_injection(db, rid, injected)
                 return dict(result, status="deduped", injected_message_id=injected)
         return dict(result, status="pending", error="receipt not yet confirmed")
     adapter = runner._authorization_adapter(source.platform, getattr(source, "profile", None))
@@ -202,12 +276,20 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
                       "gateway_session_id": entry.session_id, "gateway_session_strict": True}
     if not await transition(db, rid, token, "dispatching"):
         return dict(result, status="pending", error="attempt ownership changed")
+    release_observer = None
     try:
         if adapter is None:
             raise RuntimeError("target adapter unavailable")
         check_host(runner, adapter)
+        if require_authorization:
+            authorize = getattr(runner, "_is_user_authorized", None)
+            if not callable(authorize) or not authorize(source, allow_adapter_delegation=False):
+                raise RuntimeError("target user is not currently authorized")
+        release_observer = observe_response(adapter, event)
         task = admit(runner, adapter, entry, source, event)
     except Exception as exc:
+        if release_observer is not None:
+            release_observer()
         status = "pending" if isinstance(exc, AdmissionUncertain) else "failure"
         await transition(db, rid, token, status, error=str(exc))
         return dict(result, status=status, error=str(exc))
@@ -217,11 +299,17 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
             await asyncio.shield(task)
             injected = await exact_injection(target_db, entry.session_id, rid)
             if injected is not None:
-                await transition(db, rid, token, "dispatched", injected_id=injected)
-                return dict(result, status="dispatched", injected_message_id=injected)
+                assistant = await exact_response(target_db, entry.session_id, injected,
+                                                 getattr(event, "_self_wake_final_response", None))
+                status = "agent_responded" if assistant is not None else "dispatched"
+                await transition(db, rid, token, status, injected_id=injected, assistant_id=assistant)
+                return dict(result, status=status, injected_message_id=injected,
+                            assistant_message_id=assistant)
             error = "owned turn ended without an exact persisted wake; reconciliation pending"
         except BaseException as exc:
             error = f"owned turn outcome uncertain: {type(exc).__name__}"
+        finally:
+            release_observer()
         await transition(db, rid, token, "pending", error=error)
         return dict(result, status="pending", error=error)
 
@@ -233,4 +321,4 @@ async def wake(runner, *, payload, source_kind, session_key=None, session_id=Non
     settlement = asyncio.create_task(settle())
     pending.add(settlement)
     settlement.add_done_callback(pending.discard)
-    return await asyncio.shield(settlement)
+    return settlement

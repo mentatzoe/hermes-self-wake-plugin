@@ -186,6 +186,10 @@ def _probe_session_resolver_readable(hermes_home: str | Path | None = None) -> d
     ``$HERMES_HOME/sessions/sessions.json``. This cache path is not the plugin's
     public contract; it is the current-Hermes resolver substrate.
     """
+    from .sessions import read_routing_index, CURRENT_RESOLVER_SOURCE
+    if read_routing_index(hermes_home):
+        return {"probe": "session_resolver", "available": True,
+                "source": CURRENT_RESOLVER_SOURCE}
     path = _hermes_home(hermes_home) / "sessions" / "sessions.json"
     if not path.exists():
         return {"probe": "session_resolver", "available": False,

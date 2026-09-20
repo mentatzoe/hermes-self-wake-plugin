@@ -110,6 +110,31 @@ def test_native_origin_metadata_is_pinned(native):
     assert not event.allow_gateway_control
 
 
+@pytest.mark.parametrize("intervening_user", [False, True])
+def test_response_receipt_links_only_the_injected_turn(native, intervening_user):
+    runner, adapter, entry, db, messages = native
+    start = adapter._start_session_processing
+
+    def respond(event, key):
+        start(event, key)
+        task = adapter._session_tasks[key]
+
+        async def finish():
+            await task
+            if intervening_user:
+                messages.append({"id": 2, "role": "user", "content": "another turn"})
+            messages.append({"id": 3, "role": "assistant", "content": "done"})
+            event._self_wake_final_response = "done"
+        adapter._session_tasks[key] = asyncio.create_task(finish())
+        return True
+
+    adapter._start_session_processing = respond
+    result = asyncio.run(attempt(native))
+    assert result["status"] == ("dispatched" if intervening_user else "agent_responded")
+    assert result.get("assistant_message_id") == (None if intervening_user else 3)
+    assert asyncio.run(attempt(native))["status"] == "deduped"
+
+
 @pytest.mark.parametrize("prior", ["failure", "requested"])
 def test_concurrent_retry_has_one_owner(native, prior):
     runner, adapter, entry, db, messages = native
